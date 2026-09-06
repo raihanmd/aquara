@@ -11,6 +11,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { useSettings, type RiskProfile } from "@/hooks/use-settings";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const RISK_OPTIONS: { value: RiskProfile; label: string; desc: string }[] = [
@@ -33,13 +34,16 @@ export function SettingsButton() {
 
   return (
     <>
-      <button
+      <Button
         onClick={() => setOpen(true)}
-        className="rounded-lg border border-border/40 bg-muted/30 p-1.5 text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-colors cursor-pointer"
+        variant="ghost"
+        size="icon-sm"
+        className="border border-border/40 bg-muted/30 text-muted-foreground/60 hover:text-foreground"
         title="Settings"
+        aria-label="Settings"
       >
         <SettingsIcon className="size-3" />
-      </button>
+      </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
@@ -58,19 +62,20 @@ export function SettingsButton() {
               </label>
               <div className="grid grid-cols-3 gap-2 mt-2">
                 {RISK_OPTIONS.map((opt) => (
-                  <button
+                  <Button
                     key={opt.value}
                     onClick={() => update({ riskProfile: opt.value })}
+                    variant={settings.riskProfile === opt.value ? "secondary" : "outline"}
                     className={cn(
-                      "rounded-lg border px-3 py-2.5 text-left transition-all cursor-pointer",
+                      "h-auto flex-col items-start rounded-2xl px-3 py-2.5 text-left",
                       settings.riskProfile === opt.value
                         ? "border-foreground/30 bg-foreground/[0.06]"
-                        : "border-border/40 hover:border-border/60 hover:bg-muted/30"
+                        : "border-border/40 hover:border-border/60"
                     )}
                   >
-                    <div className="text-xs font-medium">{opt.label}</div>
-                    <div className="text-[10px] text-muted-foreground/50 mt-0.5">{opt.desc}</div>
-                  </button>
+                    <span className="text-xs font-medium">{opt.label}</span>
+                    <span className="text-[10px] text-muted-foreground/50 mt-0.5">{opt.desc}</span>
+                  </Button>
                 ))}
               </div>
               <div className="grid grid-cols-2 gap-2 mt-2">
@@ -98,18 +103,20 @@ export function SettingsButton() {
               </label>
               <div className="flex gap-2 mt-2">
                 {SLIPPAGE_OPTIONS.map((bps) => (
-                  <button
+                  <Button
                     key={bps}
                     onClick={() => update({ maxSlippage: bps })}
+                    variant={settings.maxSlippage === bps ? "secondary" : "outline"}
+                    size="sm"
                     className={cn(
-                      "rounded-lg border px-3 py-1.5 text-xs transition-all cursor-pointer",
+                      "rounded-full text-xs",
                       settings.maxSlippage === bps
                         ? "border-foreground/30 bg-foreground/[0.06] text-foreground"
-                        : "border-border/40 text-muted-foreground hover:border-border/60"
+                        : "border-border/40 text-muted-foreground"
                     )}
                   >
                     {(bps / 100).toFixed(1)}%
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
