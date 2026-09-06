@@ -227,11 +227,7 @@ export async function persistDelegation(params: {
   expiresAt?: string;
 }) {
   const { delegator, delegate, delegation, chainId = BASE_CHAIN_ID, expiresAt } = params;
-  const API_URL =
-    typeof window !== "undefined" && window.location.hostname !== "localhost"
-      ? "/backend"
-      : "http://localhost:3001";
-  const res = await fetch(`${API_URL}/api/delegations`, {
+  const res = await fetch(`/api/delegations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -252,13 +248,9 @@ export async function persistDelegation(params: {
 
 export async function revokeDelegation(params: { delegator: Address; delegate?: Address }) {
   const { delegator, delegate } = params;
-  const API_URL =
-    typeof window !== "undefined" && window.location.hostname !== "localhost"
-      ? "/backend"
-      : "http://localhost:3001";
   const url = delegate
-    ? `${API_URL}/api/delegations?delegator=${delegator}&delegate=${delegate}`
-    : `${API_URL}/api/delegations?delegator=${delegator}`;
+    ? `/api/delegations?delegator=${delegator}&delegate=${delegate}`
+    : `/api/delegations?delegator=${delegator}`;
   const res = await fetch(url, { method: "DELETE" });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

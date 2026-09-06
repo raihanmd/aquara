@@ -15,11 +15,8 @@ export function TopPositions({ limit = 3 }: { limit?: number }) {
   const selectedChain =
     CHAIN_OPTIONS.find((c) => c.value === chainFilter) ?? CHAIN_OPTIONS[0];
   const isUnsupportedChain = chainFilter !== "Base";
-  const effectiveChainIds = isUnsupportedChain
-    ? [8453]
-    : [...selectedChain.chainIds];
   const { data, isLoading, error, refetch } = useTopPositions({
-    chainIds: effectiveChainIds,
+    chainIds: [...selectedChain.chainIds],
     limit,
     sortBy,
   });
@@ -44,7 +41,8 @@ export function TopPositions({ limit = 3 }: { limit?: number }) {
 
       {isUnsupportedChain && (
         <div className="rounded-lg border border-warning/30 bg-warning px-3 py-2 text-xs text-warning-foreground">
-          {chainFilter} not supported for MVP — showing Base only. Switch to Base to deploy.
+          {chainFilter} data shown for reference. Agent management supported on
+          Base only.
         </div>
       )}
 

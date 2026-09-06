@@ -8,6 +8,9 @@ export interface TopPositionToken {
   name?: string;
   decimals?: number;
   logoURI?: string;
+  currentBalance?: { raw: string; usd?: number | null } | string;
+  initialBalance?: { raw: string; usd?: number | null } | string;
+  wallet?: { balance?: { raw: string; usd?: number | null } | null };
 }
 
 export interface TopPositionPerformance {
@@ -129,6 +132,9 @@ async function fetchTopPositions(
             name: t.meta?.name ?? t.name,
             decimals: t.meta?.decimals ?? t.decimals,
             logoURI: t.meta?.logoURI ?? t.logoURI,
+            currentBalance: t.currentBalance,
+            initialBalance: t.initialBalance,
+            wallet: t.wallet,
           })) as TopPositionToken[] | undefined;
           const stratApy = perf?.fees?.last24h?.apy ?? perf?.fees?.last7d?.apy ?? perf?.fees?.last30d?.apy;
           const lbApy = (m as any).apy?.percent;
@@ -283,6 +289,9 @@ async function fetchTopPositions(
             name: t.meta?.name ?? t.name,
             decimals: t.meta?.decimals ?? t.decimals,
             logoURI: t.meta?.logoURI ?? t.logoURI,
+            currentBalance: t.currentBalance,
+            initialBalance: t.initialBalance,
+            wallet: t.wallet,
           })) as TopPositionToken[] | undefined
 
           return normalizePosition({
@@ -346,6 +355,9 @@ function normalizePosition(raw: Record<string, unknown>): TopPosition {
     name: t.name ?? t.meta?.name,
     decimals: t.decimals ?? t.meta?.decimals,
     logoURI: t.logoURI ?? t.meta?.logoURI,
+    currentBalance: t.currentBalance,
+    initialBalance: t.initialBalance,
+    wallet: t.wallet,
   }))
   return {
     chainId: (raw.chainId as number) ?? 0,

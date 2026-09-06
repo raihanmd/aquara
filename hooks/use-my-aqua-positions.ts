@@ -4,7 +4,8 @@ import { useEffect, useState, useCallback } from "react";
 import { useAccount } from "wagmi";
 
 // ── Demo address (user's deployed ship on Base) ──────────────────────────
-export const DEMO_ADDRESS = "0xCbAfD2B1c1309b1701E9ef7e4d38C93425A6b61A" as const;
+export const DEMO_ADDRESS =
+  "0xCbAfD2B1c1309b1701E9ef7e4d38C93425A6b61A" as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 export interface AquaToken {
@@ -42,11 +43,13 @@ export interface EnrichedAquaPosition {
   } | null;
   performance: {
     fees?: {
+      last24h?: { apy: number | null; usd?: number | null };
       last7d?: { apy: number | null; usd?: number | null };
       last30d?: { apy: number | null; usd?: number | null };
       total?: { apy: number | null; usd?: number | null };
     };
     volume?: {
+      last24h?: { usd: number | null };
       last7d?: { usd: number | null };
       last30d?: { usd: number | null };
     };
@@ -64,7 +67,7 @@ export interface EnrichedAquaPosition {
  */
 export function isAquaOutOfRange(
   classification: EnrichedAquaPosition["classification"],
-  tokens: AquaToken[]
+  tokens: AquaToken[],
 ): boolean {
   // Check classification.state === 'illiquidity'
   if (classification && typeof classification === "object") {
@@ -98,7 +101,8 @@ function normalizeToken(raw: Record<string, unknown>): AquaToken {
     address: (raw.address as string) ?? (raw.token as string) ?? "",
     symbol: (raw.symbol as string) ?? (meta?.symbol as string | undefined),
     name: (raw.name as string) ?? (meta?.name as string | undefined),
-    decimals: (raw.decimals as number) ?? (meta?.decimals as number | undefined),
+    decimals:
+      (raw.decimals as number) ?? (meta?.decimals as number | undefined),
     logoURI: (raw.logoURI as string) ?? (meta?.logoURI as string | undefined),
     currentBalance: raw.currentBalance as any,
     initialBalance: raw.initialBalance as any,
@@ -114,15 +118,21 @@ function normalizeToken(raw: Record<string, unknown>): AquaToken {
   };
 }
 
-function normalizeAquaPosition(raw: Record<string, unknown>): EnrichedAquaPosition {
+function normalizeAquaPosition(
+  raw: Record<string, unknown>,
+): EnrichedAquaPosition {
   const tokensRaw = (raw.tokens as Record<string, unknown>[] | undefined) ?? [];
-  const tokens = tokensRaw.map((t) => normalizeToken(t as Record<string, unknown>));
-  const classification = (raw.classification as EnrichedAquaPosition["classification"]) ?? null;
+  const tokens = tokensRaw.map((t) =>
+    normalizeToken(t as Record<string, unknown>),
+  );
+  const classification =
+    (raw.classification as EnrichedAquaPosition["classification"]) ?? null;
   const oor = isAquaOutOfRange(classification, tokens);
 
   return {
     strategyHash: (raw.strategyHash as string) ?? "",
-    strategyBytes: (raw.strategyBytes as string) ?? (raw.strategyHash as string) ?? "",
+    strategyBytes:
+      (raw.strategyBytes as string) ?? (raw.strategyHash as string) ?? "",
     chainId: (raw.chainId as number) ?? 8453,
     app: (raw.app as string) ?? "",
     maker: (raw.maker as string) ?? "",
@@ -131,8 +141,10 @@ function normalizeAquaPosition(raw: Record<string, unknown>): EnrichedAquaPositi
     isOutOfRange: oor,
     classification,
     priceRange: (raw.priceRange as EnrichedAquaPosition["priceRange"]) ?? null,
-    performance: (raw.performance as EnrichedAquaPosition["performance"]) ?? null,
-    openedAt: (raw.openedAt as number) ?? (raw.timestamp as number) ?? undefined,
+    performance:
+      (raw.performance as EnrichedAquaPosition["performance"]) ?? null,
+    openedAt:
+      (raw.openedAt as number) ?? (raw.timestamp as number) ?? undefined,
     _raw: raw,
   };
 }
@@ -142,18 +154,21 @@ const AQUA_BASE = "https://api.1inch.com/aqua/v1.0";
 
 async function fetchAquaPositionsForMaker(
   maker: string,
-  apiKey: string
+  apiKey: string,
 ): Promise<EnrichedAquaPosition[]> {
   const params = new URLSearchParams({
     limit: "20",
     chainIds: "8453",
   });
 
-  const res = await fetch(`${AQUA_BASE}/strategies/makers/${maker}?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
+  const res = await fetch(
+    `${AQUA_BASE}/strategies/makers/${maker}?${params.toString()}`,
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
     },
-  });
+  );
 
   if (!res.ok) {
     throw new Error(`Aqua API error: ${res.status} ${res.statusText}`);
@@ -166,7 +181,9 @@ async function fetchAquaPositionsForMaker(
 
   if (!Array.isArray(items) || items.length === 0) return [];
 
-  return items.map((item) => normalizeAquaPosition(item as Record<string, unknown>));
+  return items.map((item) =>
+    normalizeAquaPosition(item as Record<string, unknown>),
+  );
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────
@@ -188,7 +205,6 @@ export function useMyAquaPositions() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [effectiveMaker, setEffectiveMaker] = useState<string | null>(null);
-  const [isDemo, setIsDemo] = useState(false);
 
   const fetchPositions = useCallback(async (maker: string) => {
     const apiKey = process.env.NEXT_PUBLIC_1INCH_API_KEY;
@@ -212,7 +228,6 @@ export function useMyAquaPositions() {
       if (!address) {
         setPositions([]);
         setEffectiveMaker(null);
-        setIsDemo(false);
         setIsLoading(false);
         return;
       }
@@ -225,10 +240,10 @@ export function useMyAquaPositions() {
         if (cancelled) return;
         setPositions(walletPositions);
         setEffectiveMaker(address);
-        setIsDemo(false);
       } catch (err) {
         if (cancelled) return;
-        const msg = err instanceof Error ? err.message : "Failed to fetch Aqua positions";
+        const msg =
+          err instanceof Error ? err.message : "Failed to fetch Aqua positions";
         setError(msg);
         console.error("[useMyAquaPositions]", err);
       } finally {
@@ -252,7 +267,6 @@ export function useMyAquaPositions() {
     if (!address) {
       setPositions([]);
       setEffectiveMaker(null);
-      setIsDemo(false);
       return;
     }
     setIsLoading(true);
@@ -261,9 +275,9 @@ export function useMyAquaPositions() {
       const walletPositions = await fetchPositions(address);
       setPositions(walletPositions);
       setEffectiveMaker(address);
-      setIsDemo(false);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to fetch Aqua positions";
+      const msg =
+        err instanceof Error ? err.message : "Failed to fetch Aqua positions";
       setError(msg);
     } finally {
       setIsLoading(false);
@@ -275,7 +289,6 @@ export function useMyAquaPositions() {
     isLoading,
     error,
     effectiveMaker,
-    isDemo: isDemo || (!address && positions.length > 0),
     refresh,
   };
 }

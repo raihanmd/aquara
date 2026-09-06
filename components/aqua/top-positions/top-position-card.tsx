@@ -1,11 +1,8 @@
 import { memo } from "react";
-import { Trophy, TrendingUp } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { formatUSD, formatAPY, getPairLabel, getFeeLabel } from "@/lib/format";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Trophy } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { TokenIcon } from "./token-icon";
+import { Button } from "@/components/ui/button";
+import { StrategyCard } from "@/components/aqua/strategy-card";
 import type { TopPosition } from "@/hooks/use-top-positions";
 
 type TopPositionCardProps = {
@@ -14,13 +11,25 @@ type TopPositionCardProps = {
   onDeploy?: (pos: TopPosition) => void;
 };
 
-function TopPositionCardInner({
-  position,
-  rank,
-  onDeploy,
-}: TopPositionCardProps) {
-  const pair = getPairLabel(position);
-  const fee = getFeeLabel(position);
+function tokenUsd(t: TopPosition["tokens"][number]): number {
+  const w: any = (t as any)?.wallet?.balance;
+  if (w && typeof w.usd === "number" && w.usd > 0) return w.usd;
+  const bal: any = (t as any)?.currentBalance;
+  if (bal && typeof bal === "object" && typeof bal.usd === "number") return bal.usd ?? 0;
+  return 0;
+}
+
+function TopPositionCardInner({ position, rank, onDeploy }: TopPositionCardProps) {
+  const t0 = position.tokens?.[0];
+  const t1 = position.tokens?.[1];
+  const pair = `${t0?.symbol ?? t0?.address?.slice(0, 6) ?? "TOKEN0"} / ${
+    t1?.symbol ?? t1?.address?.slice(0, 6) ?? "TOKEN1"
+  }`;
+  const c = position.classification;
+  const fee =
+    c && typeof c === "object" && "feePercent" in (c as Record<string, unknown>)
+      ? `${(c as any).feePercent}%`
+      : "0.05%";
   const apy =
     position.performance?.fees?.last24h?.apy ??
     position.performance?.fees?.last7d?.apy ??
@@ -31,105 +40,68 @@ function TopPositionCardInner({
     position.performance?.volume?.last7d?.usd ??
     position.performance?.volume?.last30d?.usd ??
     null;
-  const isTop = rank === 1;
+  const u0 = tokenUsd(t0);
+  const u1 = tokenUsd(t1);
+  const hasBreakdown = u0 + u1 > 0;
+  const sizeUsd = hasBreakdown ? u0 + u1 : 0;
+  const explorer =
+    position.chainId === 1
+      ? "https://etherscan.io"
+      : position.chainId === 4663
+        ? "https://robinhoodchain.blockscout.com"
+        : "https://basescan.org";
+
+  const handleDeploy = () => {
+    const a0 = t0?.address;
+    const a1 = t1?.address;
+    if (a0 && a1) {
+      const cid = position.chainId ?? 8453;
+      window.open(`https://1inch.com/id/aqua/overview/create?lt=${cid}:${a0}&gt=${cid}:${a1}`, "_blank");
+    }
+    onDeploy?.(position);
+  };
 
   return (
-    <Card
-      className={cn(
-        "group relative flex flex-col gap-0 p-4 rounded-xl border border-border/50 bg-card min-h-[188px]",
-        "transition-all duration-200",
-        "hover:border-border hover:bg-card/80 hover:-translate-y-0.5 hover:shadow-(--shadow-card)",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-      )}
-      tabIndex={0}
-      role="article"
-      aria-label={`${pair} strategy rank ${rank}`}
-    >
-      <div className="flex items-center gap-3 mb-3">
-        <Badge
-          variant="default"
-          className="flex size-6 shrink-0 items-center justify-center rounded-full p-0 text-xs font-semibold bg-primary text-primary-foreground"
-          aria-hidden="true"
-        >
-          {rank}
-        </Badge>
-        <div className="flex -space-x-1">
-          <TokenIcon token={position.tokens?.[0]} size={20} />
-          <TokenIcon token={position.tokens?.[1]} size={20} />
-        </div>
-        <span className="text-sm font-medium tracking-tight truncate">
-          {pair}
-        </span>
-        <Badge
-          variant="muted"
-          className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground border-transparent"
-        >
-          {fee}
-        </Badge>
-      </div>
-
-      <div className="flex items-baseline justify-between mb-4">
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-medium">
-            APY (24h)
-          </div>
-          <div className="text-lg font-semibold tracking-tight mt-0.5 flex items-center gap-1">
-            <TrendingUp className="size-3.5 text-primary" aria-hidden="true" />
-            {formatAPY(apy)}
-          </div>
-        </div>
-        <div className="text-right">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-medium">
-            Volume (24h)
-          </div>
-          <div className="text-xs text-muted-foreground mt-1 font-medium">
-            {formatUSD(volume)}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1.5 mb-3 text-xs text-muted-foreground/60">
-        <span>maker: </span>
+    <StrategyCard
+      pair={pair}
+      tokens={[
+        { symbol: t0?.symbol, logoURI: t0?.logoURI, address: t0?.address ?? "", usd: u0 },
+        { symbol: t1?.symbol, logoURI: t1?.logoURI, address: t1?.address ?? "", usd: u1 },
+      ]}
+      fee={fee}
+      apy={apy}
+      volume={volume}
+      sizeUsd={sizeUsd}
+      showBreakdown={hasBreakdown}
+      rank={rank}
+      headerRight={
         <a
-          href={`https://basescan.org/address/${position.maker}`}
+          href={`${explorer}/address/${position.maker}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="font-mono hover:text-foreground transition-colors truncate"
+          title={position.maker}
           onClick={(e) => e.stopPropagation()}
+          className="font-mono text-[11px] text-muted-foreground/60 hover:text-foreground transition-colors"
         >
           {position.maker.slice(0, 6)}…{position.maker.slice(-4)}
         </a>
-      </div>
-
-      <div className="mt-auto">
-        <Button
-          variant="default"
-          size="sm"
-          className="w-full"
-          onClick={() => {
-            const t0 = position.tokens?.[0]?.address;
-            const t1 = position.tokens?.[1]?.address;
-            const cid = position.chainId ?? 8453;
-            if (t0 && t1) {
-              const url = `https://1inch.com/aqua/overview/create?lt=${cid}:${t0}&gt=${cid}:${t1}`;
-              window.open(url, "_blank");
-            }
-            onDeploy?.(position);
-          }}
-        >
+      }
+      corner={
+        rank === 1 ? (
+          <div className="absolute -top-px -right-px">
+            <Badge className="flex items-center gap-1 rounded-bl-xl rounded-tr-xl bg-primary px-2 py-1 text-[10px] font-semibold text-primary-foreground border-transparent rounded-tl-none rounded-br-none">
+              <Trophy className="size-3" aria-hidden="true" />
+              Top
+            </Badge>
+          </div>
+        ) : undefined
+      }
+      footer={
+        <Button variant="default" size="sm" className="w-full" onClick={handleDeploy}>
           Deploy
         </Button>
-      </div>
-
-      {isTop && (
-        <div className="absolute -top-px -right-px">
-          <Badge className="flex items-center gap-1 rounded-bl-xl rounded-tr-xl bg-primary px-2 py-1 text-[10px] font-semibold text-primary-foreground border-transparent rounded-tl-none rounded-br-none">
-            <Trophy className="size-3" aria-hidden="true" />
-            Top
-          </Badge>
-        </div>
-      )}
-    </Card>
+      }
+    />
   );
 }
 
