@@ -4,13 +4,20 @@ import { motion } from "framer-motion";
 import { ChevronLeftIcon, ChevronRightIcon, PlusIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
-import { usePositionContext } from "@/hooks/use-position-context";
-import { useDelegation } from "@/hooks/use-delegation";
-import { QUIRKY_MESSAGES } from "@/lib/positions/constants";
-import { API_URL } from "@/lib/delegation/constants";
-import { PositionCard } from "./position-card";
+import { useMmDelegation } from "@/hooks/use-mm-delegation";
+import { useMyAquaPositions, DEMO_ADDRESS } from "@/hooks/use-my-aqua-positions";
+import { QUIRKY_MESSAGES, API_URL } from "@/lib/config";
 import { TopPositions } from "@/components/aqua/top-positions";
-import { DelegationStepper } from "@/components/delegation/delegation-stepper";
+import { AquaPositionCard } from "./aqua-position-card";
+import { MmDelegationButton } from "@/components/mm/mm-delegation-button";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 
 const PAGE_SIZE = 9;
 const GRID_SLOTS = 9;
@@ -23,68 +30,72 @@ function formatUSD(total: number): string {
 }
 
 function formatTotalValue(
-  positions: { metrics?: { positionSizeUSD: number } }[],
+  positions: { performance?: { volume?: { last7d?: { usd: number | null }; last30d?: { usd: number | null } }; fees?: { last7d?: { usd?: number | null }; last30d?: { usd?: number | null } } } | null }[]
 ): string {
-  return formatUSD(
-    positions.reduce((sum, p) => sum + (p.metrics?.positionSizeUSD ?? 0), 0),
-  );
+  let total = 0;
+  for (const p of positions) {
+    const v = p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd ?? p.performance?.fees?.last7d?.usd ?? p.performance?.fees?.last30d?.usd ?? 0;
+    if (typeof v === "number") total += v;
+  }
+  return formatUSD(total);
 }
 
 function estimateDailyYield(
-  positions: {
-    metrics?: {
-      feesEarnedUSD: number;
-      apyEstimate: number | null;
-      positionSizeUSD: number;
-    };
-  }[],
+  positions: { performance?: { fees?: { last7d?: { apy: number | null; usd?: number | null }; last30d?: { apy: number | null; usd?: number | null } }; volume?: { last7d?: { usd: number | null }; last30d?: { usd: number | null } } } | null }[]
 ): string {
   let dailyYield = 0;
   for (const p of positions) {
-    const m = p.metrics;
-    if (!m) continue;
-    if (m.feesEarnedUSD > 0) {
-      // Use actual fees (assume 30-day accumulation)
-      dailyYield += m.feesEarnedUSD / 30;
-    } else if (m.apyEstimate && m.positionSizeUSD > 0) {
-      // Use APY estimate
-      dailyYield += (m.apyEstimate / 100 / 365) * m.positionSizeUSD;
+    const feesUsd = p.performance?.fees?.last7d?.usd ?? p.performance?.fees?.last30d?.usd;
+    const apy = p.performance?.fees?.last7d?.apy ?? p.performance?.fees?.last30d?.apy;
+    const vol = (p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd ?? 0) as number;
+    if (typeof feesUsd === "number" && feesUsd > 0) {
+      dailyYield += feesUsd / 30;
+    } else if (typeof apy === "number" && typeof vol === "number" && vol > 0) {
+      dailyYield += (apy / 100 / 365) * vol;
     }
   }
   return formatUSD(dailyYield);
 }
 
+/**
+ * CRE rebalance reference — batch [approve token0, approve token1, ship(app, strategy, tokens, amounts)]
+ * Aqua ship requires both tokens approved to Aqua (0x1111113ccf1426a8e30e2bff5e005d929bf6a90a) before ship.
+ * Example deployed: WETH 0x4200000000000000000000000000000000000006 + wstETH 0xc1CBa3fcea344f92D9239c08C0568F6F2f0EE452
+ * tx 0xb8de0f... on Base chain 8453. OOR position at 0xCbAfD2B1c1309b1701E9ef7e4d38C93425A6b61A.
+ */
+
 export function PositionsGrid() {
   const { address } = useAccount();
-  const { positions, isLoading, selectPosition } = usePositionContext();
-  const { status: delegationStatus } = useDelegation();
+  const { positions, isLoading, error, effectiveMaker, isDemo } = useMyAquaPositions();
+  const { status: delegationStatus } = useMmDelegation();
   const [page, setPage] = useState(0);
   const [message, setMessage] = useState("");
   const [delegateOpen, setDelegateOpen] = useState(false);
   const isDelegated = delegationStatus === "delegated";
 
   useEffect(() => {
-    if (!address || positions.length === 0) {
+    if (positions.length === 0) {
+      if (isLoading) return;
       setMessage(
-        QUIRKY_MESSAGES[Math.floor(Math.random() * QUIRKY_MESSAGES.length)],
+        QUIRKY_MESSAGES[Math.floor(Math.random() * QUIRKY_MESSAGES.length)]
       );
       return;
     }
 
-    // First try to get rebalance info from backend
-    fetch(`${API_URL}/api/actions?address=${address}`)
+    const maker = effectiveMaker ?? address ?? DEMO_ADDRESS;
+    fetch(`${API_URL}/api/actions?address=${maker}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => {
         const actions = Array.isArray(data) ? data : (data?.actions ?? []);
         const today = Date.now() - 24 * 60 * 60 * 1000;
         const rebalances = actions.filter(
-          (a: any) =>
+          (a: { timestamp: number; type: string; status: string }) =>
             a.timestamp > today &&
             a.type === "rebalance" &&
-            a.status === "completed",
+            a.status === "completed"
         );
         const seen = new Set<string>();
-        const uniqueRebalances = rebalances.filter((a: any) => {
+        const uniqueRebalances = rebalances.filter((a: { txHashes?: string[]; id: string }) => {
           const key = a.txHashes?.[0] || a.id;
           if (seen.has(key)) return false;
           seen.add(key);
@@ -93,38 +104,37 @@ export function PositionsGrid() {
 
         if (uniqueRebalances.length > 0) {
           const uniquePositions = new Set(
-            uniqueRebalances.map((a: any) => a.tokenId).filter(Boolean),
+            uniqueRebalances.map((a: { strategyHash?: string; tokenId?: string }) => a.strategyHash ?? a.tokenId).filter(Boolean)
           );
           setMessage(
-            `Rebalanced ${uniquePositions.size} position${uniquePositions.size !== 1 ? "s" : ""} ${uniqueRebalances.length} time${uniqueRebalances.length !== 1 ? "s" : ""} today.`,
+            `Rebalanced ${uniquePositions.size} position${uniquePositions.size !== 1 ? "s" : ""} ${uniqueRebalances.length} time${uniqueRebalances.length !== 1 ? "s" : ""} today.`
           );
         } else {
-          // Fall back to position-aware messages
-          const oor = positions.filter((p) => !p.isInRange);
+          const oor = positions.filter((p) => p.isOutOfRange);
           if (oor.length > 0) {
             setMessage(
-              `${oor.length} of ${positions.length} position${positions.length !== 1 ? "s" : ""} out of range. On it.`,
+              `${oor.length} of ${positions.length} position${positions.length !== 1 ? "s" : ""} out of range. On it.`
             );
           } else {
             setMessage(
-              `All ${positions.length} position${positions.length !== 1 ? "s" : ""} in range. Looking good.`,
+              `All ${positions.length} position${positions.length !== 1 ? "s" : ""} in range. Looking good.`
             );
           }
         }
       })
       .catch(() => {
-        const oor = positions.filter((p) => !p.isInRange);
+        const oor = positions.filter((p) => p.isOutOfRange);
         if (oor.length > 0) {
           setMessage(
-            `${oor.length} of ${positions.length} position${positions.length !== 1 ? "s" : ""} out of range. On it.`,
+            `${oor.length} of ${positions.length} position${positions.length !== 1 ? "s" : ""} out of range. On it.`
           );
         } else {
           setMessage(
-            `All ${positions.length} position${positions.length !== 1 ? "s" : ""} in range. Looking good.`,
+            `All ${positions.length} position${positions.length !== 1 ? "s" : ""} in range. Looking good.`
           );
         }
       });
-  }, [address, positions]);
+  }, [address, positions, effectiveMaker, isLoading]);
 
   const totalPages = Math.max(1, Math.ceil((positions.length + 1) / PAGE_SIZE));
   const startIdx = page * PAGE_SIZE;
@@ -148,9 +158,11 @@ export function PositionsGrid() {
     }
   }
 
+  const showDemoBanner = isDemo && !address;
+  const showEmptyDemoHint = !isLoading && positions.length === 0 && !error;
+
   return (
     <div className="mx-auto w-full max-w-6xl px-6 flex flex-col justify-start py-24 min-h-full">
-      {/* Header bar */}
       <div className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-4">
           <motion.p
@@ -195,12 +207,13 @@ export function PositionsGrid() {
             </div>
 
             {!isDelegated && (
-              <button
+              <Button
                 onClick={() => setDelegateOpen(true)}
-                className="rounded-xl border border-border/50 bg-card/30 px-4 py-3 text-[13px] text-muted-foreground transition-all duration-200 cursor-pointer hover:-translate-y-0.5 hover:bg-muted/40 hover:text-foreground hover:shadow-[var(--shadow-card)]"
+                variant="outline"
+                className="border-border/50 bg-card/30 text-muted-foreground hover:bg-muted/40 hover:text-foreground hover:-translate-y-0.5 hover:shadow-(--shadow-card)"
               >
                 Delegate All
-              </button>
+              </Button>
             )}
           </motion.div>
         )}
@@ -208,27 +221,129 @@ export function PositionsGrid() {
 
       <TopPositions limit={3} />
 
-      {/* Loading state */}
-      {isLoading && positions.length === 0 && (
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-          {[...Array(GRID_SLOTS)].map((_, i) => (
-            <div
-              key={i}
-              className="h-[170px] rounded-xl border border-border/50 bg-card"
-            >
-              <div className="flex h-full items-center justify-center">
-                <div className="size-4 rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60 animate-spin" />
-              </div>
+      <div className="mt-8">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold tracking-tight flex items-center gap-2">
+            Your Aqua Positions
+            {effectiveMaker && (
+              <span className="text-xs font-mono font-normal text-muted-foreground/60">
+                {effectiveMaker.slice(0, 6)}…{effectiveMaker.slice(-4)}
+                {isDemo && <span className="ml-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">demo</span>}
+              </span>
+            )}
+          </h2>
+          {totalPages > 1 && (
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                disabled={page === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                aria-label="Previous page"
+              >
+                <ChevronLeftIcon className="size-4" />
+              </Button>
+              <span className="text-xs text-muted-foreground px-2">
+                {page + 1} / {totalPages}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                disabled={page >= totalPages - 1}
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                aria-label="Next page"
+              >
+                <ChevronRightIcon className="size-4" />
+              </Button>
             </div>
-          ))}
+          )}
         </div>
-      )}
 
-      <DelegationStepper
-        open={delegateOpen}
-        onOpenChange={setDelegateOpen}
-        mode={positions.map((p) => p.tokenId)}
-      />
+        {showDemoBanner && (
+          <div className="mb-4 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+            Showing demo Aqua positions for <span className="font-mono">{DEMO_ADDRESS.slice(0, 6)}…{DEMO_ADDRESS.slice(-4)}</span> on Base (8453). Connect wallet to see your own.
+          </div>
+        )}
+
+        {isLoading && positions.length === 0 && (
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+            {[...Array(GRID_SLOTS)].map((_, i) => (
+              <div
+                key={i}
+                className="h-[170px] rounded-xl border border-border/50 bg-card"
+              >
+                <div className="flex h-full items-center justify-center">
+                  <div className="size-4 rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60 animate-spin" />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isLoading && error && (
+          <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-6 text-center">
+            <p className="text-sm text-destructive">Failed to load Aqua positions: {error}</p>
+            <p className="text-xs text-muted-foreground mt-1">Check NEXT_PUBLIC_1INCH_API_KEY and try again.</p>
+          </div>
+        )}
+
+        {!isLoading && !error && positions.length === 0 && (
+          <div className="rounded-xl border border-border/50 bg-card p-8 text-center">
+            <p className="text-sm font-medium">No Aqua positions found</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {address
+                ? `No strategies for ${address.slice(0, 6)}…${address.slice(-4)} on Base. Showing demo ${DEMO_ADDRESS.slice(0, 6)}…${DEMO_ADDRESS.slice(-4)} was empty too.`
+                : `Connect wallet or deploy a ship on Base via Aqua (WETH 0x4200… + wstETH 0xc1CB…). Demo ${DEMO_ADDRESS.slice(0, 6)}…${DEMO_ADDRESS.slice(-4)} has no active strategies.`}
+            </p>
+          </div>
+        )}
+
+        {!isLoading && !error && positions.length > 0 && (
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+            {slots.map((slot, idx) => {
+              if (slot.type === "position") {
+                return <AquaPositionCard key={slot.position.strategyHash + idx} position={slot.position} />;
+              }
+              if (slot.type === "plus") {
+                return (
+                  <div
+                    key="plus"
+                    className="flex h-[170px] items-center justify-center rounded-xl border border-dashed border-border/50 bg-card/30 text-muted-foreground/40"
+                  >
+                    <PlusIcon className="size-5" />
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={`ghost-${idx}`}
+                  className="h-[170px] rounded-xl border border-border/20 bg-card/20"
+                  aria-hidden="true"
+                />
+              );
+            })}
+          </div>
+        )}
+
+        {showEmptyDemoHint && !showDemoBanner && (
+          <p className="mt-3 text-xs text-muted-foreground/60">
+            Demo address: <span className="font-mono">{DEMO_ADDRESS}</span> on Base 8453
+          </p>
+        )}
+      </div>
+
+      <Dialog open={delegateOpen} onOpenChange={setDelegateOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Delegate to Aqua EZ</DialogTitle>
+            <DialogDescription>
+              Grant the agent permission to manage all positions via MetaMask
+              delegation.
+            </DialogDescription>
+          </DialogHeader>
+          <MmDelegationButton />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

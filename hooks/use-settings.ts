@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { API_URL } from "@/lib/delegation/constants";
+import { API_URL } from "@/lib/config";
 
 export type RiskProfile = "low" | "medium" | "high";
 

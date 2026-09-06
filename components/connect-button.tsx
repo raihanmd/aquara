@@ -1,6 +1,7 @@
 "use client";
 
 import { useAccount, useConnect, useDisconnect, useConnectors } from "wagmi";
+import { Button } from "@/components/ui/button";
 
 export function ConnectButton() {
   const { address, isConnected } = useAccount();
@@ -10,9 +11,11 @@ export function ConnectButton() {
 
   if (isConnected && address) {
     return (
-      <button
+      <Button
         onClick={() => disconnect()}
-        className="group flex items-center gap-2 rounded-lg border border-border/40 bg-muted/30 px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted/50 cursor-pointer"
+        variant="outline"
+        size="sm"
+        className="group gap-2 bg-muted/30 text-foreground/80 hover:bg-muted/50 border-border/40"
       >
         <span className="size-1.5 rounded-full bg-emerald-500 group-hover:bg-red-400 transition-colors" />
         <span className="group-hover:hidden">
@@ -21,20 +24,22 @@ export function ConnectButton() {
         <span className="hidden group-hover:inline text-muted-foreground">
           Disconnect
         </span>
-      </button>
+      </Button>
     );
   }
 
   return (
-    <button
+    <Button
       onClick={() => {
         const connector = connectors[0];
         if (connector) connect({ connector });
       }}
       disabled={isPending}
-      className="rounded-lg border border-border/40 bg-foreground px-3 py-1.5 text-xs font-medium text-background transition-colors hover:bg-foreground/90 cursor-pointer disabled:opacity-50"
+      variant="default"
+      size="sm"
+      className="bg-foreground text-background hover:bg-foreground/90 border-border/40"
     >
       {isPending ? "Connecting..." : "Connect Wallet"}
-    </button>
+    </Button>
   );
 }

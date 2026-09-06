@@ -4,7 +4,6 @@ import { WalletProvider } from "@/components/wallet-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 import "./globals.css";
-import { PositionProvider } from "@/hooks/use-position-context";
 import { Toaster } from "sonner";
 
 export const metadata: Metadata = {
@@ -41,28 +40,26 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      className={`${geist.variable} ${geistMono.variable} ${playfair.variable} dark`}
+      className={`${geist.variable} ${geistMono.variable} ${playfair.variable}`}
       lang="en"
       suppressHydrationWarning
     >
       <body className="antialiased">
         <WalletProvider>
           <TooltipProvider>
-            <PositionProvider>
-              <div className="flex h-dvh">
-                <div className="flex flex-1 flex-col min-w-0">
-                  <Toaster
-                    position="top-center"
-                    theme="system"
-                    toastOptions={{
-                      className:
-                        "!bg-card !text-foreground !border-border/50 !shadow-[var(--shadow-float)]",
-                    }}
-                  />
-                  {children}
-                </div>
+            <div className="flex h-dvh">
+              <div className="flex flex-1 flex-col min-w-0">
+                <Toaster
+                  position="top-center"
+                  theme="light"
+                  toastOptions={{
+                    className:
+                      "!bg-card !text-foreground !border-border/50 !shadow-[var(--shadow-float)]",
+                  }}
+                />
+                {children}
               </div>
-            </PositionProvider>
+            </div>
           </TooltipProvider>
         </WalletProvider>
       </body>

@@ -12,6 +12,10 @@ export interface TopPositionToken {
 
 export interface TopPositionPerformance {
   fees: {
+    last24h: {
+      apy: number | null;
+      usd?: number;
+    };
     last7d: {
       apy: number | null;
       usd?: number;
@@ -22,6 +26,9 @@ export interface TopPositionPerformance {
     };
   };
   volume: {
+    last24h: {
+      usd: number | null;
+    };
     last7d: {
       usd: number | null;
     };
@@ -69,7 +76,9 @@ async function fetchTopPositions(
     );
   }
 
+  const isSingleChainFilter = chainIds.length === 1;
   const tryLeaderboard = async (): Promise<TopPosition[] | null> => {
+    if (isSingleChainFilter) return null;
     try {
       const lbRes = await fetch(`${AQUA_BASE}/leaderboard/makers?limit=${limit * 2}`, {
         headers: { Authorization: `Bearer ${apiKey}` },
@@ -121,18 +130,20 @@ async function fetchTopPositions(
             decimals: t.meta?.decimals ?? t.decimals,
             logoURI: t.meta?.logoURI ?? t.logoURI,
           })) as TopPositionToken[] | undefined;
-          const stratApy = perf?.fees?.last7d?.apy ?? perf?.fees?.last30d?.apy;
+          const stratApy = perf?.fees?.last24h?.apy ?? perf?.fees?.last7d?.apy ?? perf?.fees?.last30d?.apy;
           const lbApy = (m as any).apy?.percent;
-          const stratVol = perf?.volume?.last7d?.usd ?? perf?.volume?.last30d?.usd;
+          const stratVol = perf?.volume?.last24h?.usd ?? perf?.volume?.last7d?.usd ?? perf?.volume?.last30d?.usd;
           const lbVol = (m as any).volume?.usd;
           const isZeroOrNull = (v: any) => v === null || v === undefined || v === 0;
           if (isZeroOrNull(stratApy) && lbApy) {
             perf = {
               fees: {
+                last24h: { apy: lbApy, usd: perf?.fees?.last24h?.usd ?? perf?.fees?.last7d?.usd ?? perf?.fees?.last30d?.usd ?? null },
                 last7d: { apy: lbApy, usd: perf?.fees?.last7d?.usd ?? perf?.fees?.last30d?.usd ?? null },
                 last30d: { apy: lbApy, usd: perf?.fees?.last30d?.usd ?? null },
               },
               volume: {
+                last24h: { usd: isZeroOrNull(stratVol) ? lbVol : stratVol },
                 last7d: { usd: isZeroOrNull(stratVol) ? lbVol : stratVol },
                 last30d: { usd: isZeroOrNull(stratVol) ? lbVol : stratVol },
               },
@@ -140,10 +151,12 @@ async function fetchTopPositions(
           } else if (isZeroOrNull(stratVol) && lbVol) {
             perf = {
               fees: {
+                last24h: { apy: stratApy ?? null, usd: perf?.fees?.last24h?.usd ?? perf?.fees?.last7d?.usd ?? perf?.fees?.last30d?.usd ?? null },
                 last7d: { apy: stratApy ?? null, usd: perf?.fees?.last7d?.usd ?? perf?.fees?.last30d?.usd ?? null },
                 last30d: { apy: stratApy ?? null, usd: perf?.fees?.last30d?.usd ?? null },
               },
               volume: {
+                last24h: { usd: lbVol },
                 last7d: { usd: lbVol },
                 last30d: { usd: lbVol },
               },
@@ -166,19 +179,29 @@ async function fetchTopPositions(
           if (out.length >= limit) break;
         } catch {}
       }
-      out.sort((a, b) => {
+      const seenLb = new Set<string>();
+      const distinctOut = out.filter((p) => {
+        const t0 = p.tokens[0]?.symbol ?? p.tokens[0]?.address ?? "";
+        const t1 = p.tokens[1]?.symbol ?? p.tokens[1]?.address ?? "";
+        const fee = (p.classification as any)?.feePercent ?? "";
+        const key = `${t0}-${t1}-${fee}-${p.chainId}`;
+        if (seenLb.has(key)) return false;
+        seenLb.add(key);
+        return true;
+      });
+      distinctOut.sort((a, b) => {
         if (sortBy === "apy") {
-          const av = a.performance?.fees?.last7d?.apy ?? a.performance?.fees?.last30d?.apy ?? -1;
-          const bv = b.performance?.fees?.last7d?.apy ?? b.performance?.fees?.last30d?.apy ?? -1;
+          const av = a.performance?.fees?.last24h?.apy ?? a.performance?.fees?.last7d?.apy ?? a.performance?.fees?.last30d?.apy ?? -1;
+          const bv = b.performance?.fees?.last24h?.apy ?? b.performance?.fees?.last7d?.apy ?? b.performance?.fees?.last30d?.apy ?? -1;
           return (bv ?? -1) - (av ?? -1);
         }
-        const av = a.performance?.volume?.last7d?.usd ?? a.performance?.volume?.last30d?.usd ?? 0;
-        const bv = b.performance?.volume?.last7d?.usd ?? b.performance?.volume?.last30d?.usd ?? 0;
+        const av = a.performance?.volume?.last24h?.usd ?? a.performance?.volume?.last7d?.usd ?? a.performance?.volume?.last30d?.usd ?? 0;
+        const bv = b.performance?.volume?.last24h?.usd ?? b.performance?.volume?.last7d?.usd ?? b.performance?.volume?.last30d?.usd ?? 0;
         return (bv ?? 0) - (av ?? 0);
       });
-      const filtered = out.filter((p) => {
-        const apy = p.performance?.fees?.last30d?.apy;
-        const vol = p.performance?.volume?.last30d?.usd;
+      const filtered = distinctOut.filter((p) => {
+        const apy = p.performance?.fees?.last24h?.apy ?? p.performance?.fees?.last7d?.apy ?? p.performance?.fees?.last30d?.apy;
+        const vol = p.performance?.volume?.last24h?.usd ?? p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd;
         return (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
       });
       return filtered.length >= 2 ? filtered.slice(0, limit) : null;
@@ -280,22 +303,33 @@ async function fetchTopPositions(
     enriched.push(...results);
   }
 
-  enriched.sort((a, b) => {
+  const seenPairs = new Set<string>();
+  const distinct = enriched.filter((p) => {
+    const t0 = p.tokens[0]?.symbol ?? p.tokens[0]?.address ?? "";
+    const t1 = p.tokens[1]?.symbol ?? p.tokens[1]?.address ?? "";
+    const fee = (p.classification as any)?.feePercent ?? (p.classification as any)?.fee ?? "";
+    const key = `${t0}-${t1}-${fee}-${p.chainId}`;
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
+
+  distinct.sort((a, b) => {
     if (sortBy === "apy") {
-      const aApy = a.performance?.fees?.last7d?.apy ?? a.performance?.fees?.last30d?.apy;
-      const bApy = b.performance?.fees?.last7d?.apy ?? b.performance?.fees?.last30d?.apy;
+      const aApy = a.performance?.fees?.last24h?.apy ?? a.performance?.fees?.last7d?.apy ?? a.performance?.fees?.last30d?.apy;
+      const bApy = b.performance?.fees?.last24h?.apy ?? b.performance?.fees?.last7d?.apy ?? b.performance?.fees?.last30d?.apy;
       const aVal = aApy === null || aApy === undefined ? -1 : aApy;
       const bVal = bApy === null || bApy === undefined ? -1 : bApy;
       return bVal - aVal;
     }
-    const aVol = a.performance?.volume?.last7d?.usd ?? a.performance?.volume?.last30d?.usd;
-    const bVol = b.performance?.volume?.last7d?.usd ?? b.performance?.volume?.last30d?.usd;
+    const aVol = a.performance?.volume?.last24h?.usd ?? a.performance?.volume?.last7d?.usd ?? a.performance?.volume?.last30d?.usd;
+    const bVol = b.performance?.volume?.last24h?.usd ?? b.performance?.volume?.last7d?.usd ?? b.performance?.volume?.last30d?.usd;
     const aVal = aVol === null || aVol === undefined ? 0 : aVol;
     const bVal = bVol === null || bVol === undefined ? 0 : bVol;
     return bVal - aVal;
   });
 
-  return enriched.slice(0, limit);
+  return distinct.slice(0, limit);
 }
 
 function isPerformance(v: unknown): boolean {
