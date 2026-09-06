@@ -48,8 +48,7 @@ export function useMmDelegation() {
     if (!address) return;
     setStatus("checking");
     try {
-      const API = typeof window !== "undefined" && window.location.hostname !== "localhost" ? "/backend" : "http://localhost:3001";
-      const res = await fetch(`${API}/api/delegations?delegator=${address}`);
+      const res = await fetch(`/api/delegations?delegator=${address}`);
       if (!res.ok) {
         setStatus("not-delegated");
         return;
@@ -159,6 +158,10 @@ export function useMmDelegation() {
       setStatus("delegated");
       return true;
     } catch (err: any) {
+      const detail =
+        (err as any)?.details ||
+        (err as any)?.cause?.message ||
+        (err as any)?.cause?.details;
       if (isUserRejected(err)) {
         setError("Signature rejected — please approve the delegation to continue.");
       } else if (isUnsupportedWallet(err)) {
@@ -167,6 +170,8 @@ export function useMmDelegation() {
         );
       } else if (err?.code === 4001) {
         setError("Request rejected — please approve the signature to delegate.");
+      } else if (typeof detail === "string" && detail.length > 0) {
+        setError(detail);
       } else if (err?.message?.toLowerCase().includes("unsupported")) {
         setError("Your wallet does not support this operation. Please use MetaMask latest version.");
       } else {
