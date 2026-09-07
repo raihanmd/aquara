@@ -1,0 +1,14 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+optimizer = true
+optimizer_runs = 1000
+bytecode_hash = "none"
+allow_paths = ["../../alma-reference"]
+
+remappings = [
+  "calibur/=../../alma-reference/contracts/lib/calibur/src/",
+  "solady/=../../alma-reference/contracts/lib/calibur/lib/solady/src/",
+  "forge-std/=../../alma-reference/contracts/lib/calibur/lib/forge-std/src/",
+]

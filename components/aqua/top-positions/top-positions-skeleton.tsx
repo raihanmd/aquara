@@ -13,6 +13,10 @@ export function CardSkeleton() {
         <Skeleton className="h-9 rounded-md" />
         <Skeleton className="h-9 rounded-md" />
       </div>
+      <div className="mb-1.5 flex gap-5 justify-between">
+        <Skeleton className="h-2 w-20 rounded-full" />
+        <Skeleton className="h-2 w-20 rounded-full" />
+      </div>
       <div className="mt-auto h-1.5">
         <Skeleton className="h-1.5 w-full rounded-full" />
       </div>

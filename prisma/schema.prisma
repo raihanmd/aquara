@@ -27,3 +27,22 @@ model Delegation {
   @@index([expiresAt])
   @@map("delegations")
 }
+
+model ManagedUser {
+  address   String   @id @db.VarChar(42)
+  chainId   Int      @default(8453)
+  txHash    String?  @db.VarChar(66)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([chainId])
+  @@map("managed_users")
+}
+
+model AquaCache {
+  key       String   @id @db.VarChar(128)
+  data      Json
+  updatedAt DateTime @updatedAt
+
+  @@map("aqua_cache")
+}

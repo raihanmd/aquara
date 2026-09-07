@@ -84,8 +84,8 @@ export function AquaPositionCard({ position }: { position: EnrichedAquaPosition 
       extra={
         position.priceRange?.lower !== undefined || position.priceRange?.upper !== undefined ? (
           <div className="text-[11px] text-muted-foreground/60 mb-3">
-            Range: {position.priceRange?.lower != null ? String(position.priceRange.lower) : "—"} →{" "}
-            {position.priceRange?.upper != null ? String(position.priceRange.upper) : "—"}
+            Range: {position.priceRange?.lower != null ? String(position.priceRange.lower) : "-"} →{" "}
+            {position.priceRange?.upper != null ? String(position.priceRange.upper) : "-"}
           </div>
         ) : undefined
       }

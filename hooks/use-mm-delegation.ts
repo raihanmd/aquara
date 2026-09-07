@@ -82,7 +82,7 @@ export function useMmDelegation() {
       return false;
     }
     if (!walletClient) {
-      setError("Wallet not connected — please connect your wallet first");
+      setError("Wallet not connected - please connect your wallet first");
       return false;
     }
     setIsSubmitting(true);
@@ -110,7 +110,7 @@ export function useMmDelegation() {
       return true;
     } catch (err: any) {
       if (isUserRejected(err)) {
-        setError("Authorization rejected — please approve to activate smart wallet.");
+        setError("Authorization rejected - please approve to activate smart wallet.");
       } else if (isUnsupportedWallet(err)) {
         setError(
           "Your wallet doesn't support EIP-7702 delegation. Please update MetaMask to latest version or use a wallet that supports EIP-7702."
@@ -132,7 +132,7 @@ export function useMmDelegation() {
       return false;
     }
     if (!walletClient) {
-      setError("Wallet not connected — please connect your wallet first");
+      setError("Wallet not connected - please connect your wallet first");
       return false;
     }
     setIsSubmitting(true);
@@ -163,13 +163,13 @@ export function useMmDelegation() {
         (err as any)?.cause?.message ||
         (err as any)?.cause?.details;
       if (isUserRejected(err)) {
-        setError("Signature rejected — please approve the delegation to continue.");
+        setError("Signature rejected - please approve the delegation to continue.");
       } else if (isUnsupportedWallet(err)) {
         setError(
           "Your wallet doesn't support delegation. Please update MetaMask or use a compatible wallet."
         );
       } else if (err?.code === 4001) {
-        setError("Request rejected — please approve the signature to delegate.");
+        setError("Request rejected - please approve the signature to delegate.");
       } else if (typeof detail === "string" && detail.length > 0) {
         setError(detail);
       } else if (err?.message?.toLowerCase().includes("unsupported")) {

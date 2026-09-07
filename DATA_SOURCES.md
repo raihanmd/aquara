@@ -1,4 +1,4 @@
-# Aqua Data Sources — Temuan untuk AI Manager
+# Aqua Data Sources - Temuan untuk AI Manager
 
 > Catatan riset 2026-09-05 untuk hackathon 10 hari. Semua endpoint butuh `1inch API key` header `Authorization: Bearer <key>`.
 
@@ -56,3 +56,28 @@
 - Virtual balance tidak perlu `approve` ulang ke Aqua kalau allowance masih `max`.
 - Strategy immutable: rebalance = `dock(old) + ship(new)` dalam 1 Calibur batch `SignedBatchedCall`.
 - Contract addresses sabit di `13 chain`: lihat `supportedChains = [1,10,56,100,130,137,146,324,4663,8453,42161,43114,59144]`.
+
+## 4. Shared Liquidity - shining feature (dari 1inch.com/aqua/learn)
+
+Sumber: `how-aqua-works`, `why-aqua/shared-liquidity`, `fees-earnings-apr` (Juli-Agustus 2026).
+
+- **Satu saldo → banyak posisi.** Token di wallet, posisi cuma quoting. Tidak ada yang disetorkan; token pindah hanya pas swap fill (atomik pull+push).
+- **SLR (Shared Liquidity Ratio)** = total quoted / wallet balance. Contoh docs: 3 posisi quoting $300k dari saldo $100k. SLR = availability, BUKAN exposure/leverage. Tidak ada pinjam-meminjam.
+- **TVU (Total Value Unlocked)** vs TVL: TVU = yang benar-benar bisa dipakai pas swap terjadi. Dashboard kita tampilkan TVU, bukan TVL.
+- **Fee auto-compound**: fee masuk wallet dalam token yang di-swap → langsung jadi dasar quoting. Tidak ada claim.
+- **Underfunding ≠ likuidasi**: wallet < virtual → posisi berhenti fill, top-up → jalan lagi. Tidak ada pause on-chain.
+- **Rebalance = dock + ship** (strategy immutable). Ganti fee/range = tutup + buka baru, tanpa pindah token.
+- **Fee vs volume tradeoff**: fee tinggi = jarang fill (data Uniswap: 58% likuiditas di tier mahal cuma eksekusi 21% volume). Per posisi, bisa dibalik.
+- **Protocol fee DAO**: 1/4 (tier rendah) atau 1/6 (tier tinggi) dari swap fee, otomatis.
+- **APR = kaca spion**: fees window terakhir disetahunkan terhadap nilai pendukung. Bukan janji.
+
+## 5. Sinyal CRE (dari API di atas)
+
+| Sinyal | Endpoint | Aksi agent |
+|---|---|---|
+| `classification.state == illiquidity` atau token `currentBalance.raw == 0` | `makers/{maker}`, `overview` | `dock` posisi mati |
+| `performance.volume.last24h.usd` turun 2 periode | `overview`, `makers/{maker}/stats` | pertimbangkan pindah bobot |
+| `performance.fees.*.apy` vs fee tier | `overview` | turunkan fee bila volume sepi (dock+ship tier baru) |
+| `sum(strategy virtual) > wallet+allowance` per token | `makers/{maker}` (`currentBalance` vs `wallet.balance`) | warning over-commit, SLR semu |
+| Merkl eligible markets | Merkl API | prioritaskan ship ke market campaign |
+| `priceRange` vs harga kini | `overview.priceRange` | geser range (dock+ship) |
