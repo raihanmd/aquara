@@ -12,6 +12,11 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { prisma } from "@/lib/prisma";
+import {
+  parse7702Target,
+  readCaliburDomain,
+  type CaliburDomain,
+} from "@/lib/delegation/actions";
 
 export const dynamic = "force-dynamic";
 
@@ -53,10 +58,19 @@ const caliburExecuteAbi = [
   },
 ] as const;
 
+const domainSchema = z.object({
+  name: z.string(),
+  version: z.string(),
+  chainId: z.number(),
+  verifyingContract: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  salt: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+});
+
 const bodySchema = z.object({
   userAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   signedBatchedCall: z.unknown(),
   signature: z.string().regex(/^0x[a-fA-F0-9]+$/),
+  domain: domainSchema.optional(),
 });
 
 export async function POST(req: Request) {
@@ -69,6 +83,7 @@ export async function POST(req: Request) {
     signedBatchedCall: any;
     signature: string;
   };
+  const clientDomain = parsed.data.domain as CaliburDomain | undefined;
 
   const relayerPk = (process.env.RELAYER_PRIVATE_KEY || process.env.AGENT_PRIVATE_KEY) as
     | `0x${string}`
@@ -108,17 +123,42 @@ export async function POST(req: Request) {
     });
 
     const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL || "https://mainnet.base.org";
+    const account = privateKeyToAccount(relayerPk);
+    const walletClient = createWalletClient({ account, chain: base, transport: http(rpcUrl) });
+    const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
+
+    const userAddr = userAddress as Address;
+    const impl = parse7702Target(
+      await publicClient.getCode({ address: userAddr }).catch(() => undefined)
+    );
+    const onchain = impl
+      ? await readCaliburDomain(publicClient, userAddr, impl)
+      : null;
+    const domain: CaliburDomain = onchain ?? clientDomain ?? {
+      name: "Calibur",
+      version: "1.0.0",
+      chainId: 8453,
+      verifyingContract: userAddr,
+      salt: "0x000000000000000000000000000000009b1d0af20d8c6d0a44e162d11f9b8f00",
+    };
+    if (
+      domain.name !== "Calibur" ||
+      domain.chainId !== 8453 ||
+      domain.verifyingContract.toLowerCase() !== userAddr.toLowerCase()
+    ) {
+      return Response.json({ error: "Invalid EIP-712 domain for this account" }, { status: 400 });
+    }
 
     // Gas-griefing guard: verify the root signature recovers to the user
     // BEFORE spending relayer gas. Invalid sigs get 400, never reach chain.
     const { recoverTypedDataAddress } = await import("viem");
     const recovered = await recoverTypedDataAddress({
       domain: {
-        name: "Calibur",
-        version: "1.0.0",
-        chainId: 8453,
+        name: domain.name,
+        version: domain.version,
+        chainId: domain.chainId,
         verifyingContract: userAddress as Address,
-        salt: "0x000000000000000000000000000000009b1d0af20d8c6d0a44e162d11f9b8f00",
+        salt: domain.salt,
       } as any,
       types: {
         EIP712Domain: [
@@ -165,10 +205,6 @@ export async function POST(req: Request) {
     if (recovered.toLowerCase() !== (userAddress as string).toLowerCase()) {
       return Response.json({ error: "Signature does not match userAddress" }, { status: 400 });
     }
-
-    const account = privateKeyToAccount(relayerPk);
-    const walletClient = createWalletClient({ account, chain: base, transport: http(rpcUrl) });
-    const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
 
     const txHash = await walletClient.sendTransaction({
       to: userAddress as Address,

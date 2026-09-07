@@ -20,9 +20,12 @@ import {
 import {
   caliburAbi,
   caliburUpdateAbi,
+  eip712DomainAbi,
   hookAbi,
+  ANY_FN_SEL,
   CALIBUR_ADDRESS,
   GUARDED_EXECUTOR_HOOK,
+  ONEINCH_V6_ROUTER,
 } from "./constants";
 import { AQUA, KNOWN_TOKENS, SELECTORS } from "@/lib/config";
 
@@ -92,6 +95,8 @@ export function buildDelegationCalldata(params: DelegationParams): Hex {
   const whitelistEntries: { target: Address; selector: Hex }[] = [
     { target: AQUA, selector: SELECTORS.aquaShip },
     { target: AQUA, selector: SELECTORS.aquaDock },
+    // 1inch router, any entry point (agent swaps need this)
+    { target: ONEINCH_V6_ROUTER, selector: ANY_FN_SEL },
     // Token approvals
     ...KNOWN_TOKENS.concat(extraTokens).map((token) => ({
       target: token,
@@ -167,6 +172,8 @@ export function buildDelegationCalls(params: DelegationParams): Call[] {
   const whitelistEntries: { target: Address; selector: Hex }[] = [
     { target: AQUA, selector: SELECTORS.aquaShip },
     { target: AQUA, selector: SELECTORS.aquaDock },
+    // 1inch router, any entry point (agent swaps need this)
+    { target: ONEINCH_V6_ROUTER, selector: ANY_FN_SEL },
     ...KNOWN_TOKENS.concat(extraTokens).map((token) => ({
       target: token,
       selector: SELECTORS.erc20Approve,
@@ -277,4 +284,102 @@ export function buildRevokeCall(userAddress: Address, keyHash: Hex): Call {
     args: [keyHash],
   });
   return { to: userAddress, value: 0n, data };
+}
+
+// ── Version-agnostic Calibur support ─────────────────────────────────────
+// Works with ANY Calibur implementation (v1.0.0, v1.1.0, future): parse the
+// 7702 target from code, confirm the Calibur key-management interface with a
+// static call, and read the exact EIP-712 domain on-chain (EIP-5267) so
+// signatures always match the deployed implementation.
+
+export function parse7702Target(code: string | undefined | null): Address | null {
+  if (!code) return null;
+  const lower = code.toLowerCase();
+  if (!lower.startsWith("0xef0100") || lower.length < 48) return null;
+  return ("0x" + lower.slice(8, 48)) as Address;
+}
+
+export function caliburSaltFor(impl: Address): Hex {
+  return ("0x000000000000000000000000" + impl.toLowerCase().slice(2)) as Hex;
+}
+
+const ZERO_HASH =
+  "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+
+const isRegisteredProbeAbi = [
+  {
+    name: "isRegistered",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "keyHash", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
+
+export interface ChainReader {
+  getCode: (args: { address: Address }) => Promise<string | undefined>;
+  readContract: (args: any) => Promise<any>;
+}
+
+export async function verifyCaliburAccount(
+  client: ChainReader,
+  account: Address
+): Promise<Address | null> {
+  const code = await client.getCode({ address: account });
+  const impl = parse7702Target(code);
+  if (!impl) return null;
+  try {
+    const result = await client.readContract({
+      address: account,
+      abi: isRegisteredProbeAbi,
+      functionName: "isRegistered",
+      args: [ZERO_HASH],
+    });
+    if (typeof result !== "boolean") return null;
+    return impl;
+  } catch {
+    return null;
+  }
+}
+
+export interface CaliburDomain {
+  name: string;
+  version: string;
+  chainId: number;
+  verifyingContract: Address;
+  salt: Hex;
+}
+
+export async function readCaliburDomain(
+  client: ChainReader,
+  account: Address,
+  impl: Address
+): Promise<CaliburDomain> {
+  try {
+    const [, name, version, chainId, verifyingContract, salt] =
+      (await client.readContract({
+        address: account,
+        abi: eip712DomainAbi,
+        functionName: "eip712Domain",
+        args: [],
+      })) as unknown as readonly [string, string, string, bigint, Address, Hex];
+    if (name && version && salt) {
+      return {
+        name,
+        version,
+        chainId: Number(chainId),
+        verifyingContract,
+        salt,
+      };
+    }
+  } catch {
+    // ignored - static fallback below covers non-EIP-5267 implementations
+  }
+  return {
+    name: "Calibur",
+    version: "1.0.0",
+    chainId: 8453,
+    verifyingContract: account,
+    salt: caliburSaltFor(impl),
+  };
 }

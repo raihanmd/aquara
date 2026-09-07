@@ -13,6 +13,16 @@ export const AQUA: Address = "0x1111113ccf1426a8e30e2bff5e005d929bf6a90a";
 export const AQUA_ROUTER: Address =
   "0x111111338c5091e8440b67b168bae16a668ac0de";
 
+// 1inch Aggregation Router v6 (Base) - agent swaps route through here.
+// Whitelisted with ANY_FN_SEL because the router picks a different entry
+// point per route (swap, unoswap, uniswapV3Swap, ...).
+export const ONEINCH_V6_ROUTER: Address =
+  "0x111111125421ca6dc452d289314280a0f8842a65";
+
+// GuardedExecutorHook wildcard sentinel: matches any function selector.
+// Verified on-chain against the deployed hook (ANY_FN_SEL() === 0x32323232).
+export const ANY_FN_SEL = "0x32323232" as Hex;
+
 // Legacy Uniswap (keep for reference, not used for Aqua)
 export const POSITION_MANAGER: Address =
   "0x7c5f5a4bbd8fd63184577525326123b519429bdc";
@@ -153,7 +163,26 @@ export const hookAbi = [
   },
 ] as const;
 
-// ── Calibur update() ABI (for setting hook on key) ──────────────────────
+// ── EIP-5267 eip712Domain() ABI (version-agnostic domain discovery) ───────
+// Lets us read the exact EIP-712 domain (name/version/salt) from ANY Calibur
+// implementation instead of hardcoding one version's domain separator.
+export const eip712DomainAbi = [
+  {
+    name: "eip712Domain",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "fields", type: "bytes1" },
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" },
+      { name: "verifyingContract", type: "address" },
+      { name: "salt", type: "bytes32" },
+      { name: "extensions", type: "uint256[]" },
+    ],
+  },
+] as const;
 // Settings is `type Settings is uint256` in Solidity - a packed uint256, NOT a struct.
 // Layout: bits 0-159 = hook address, bits 160-199 = expiry (uint40), bit 200 = isAdmin
 // Pack as: (expiry << 160n) | BigInt(hookAddress)
