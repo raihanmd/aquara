@@ -8,7 +8,7 @@ export const CALIBUR_ADDRESS: Address =
 export const GUARDED_EXECUTOR_HOOK: Address =
   "0x033Be604929CbD65Fb67880741aB2b8292E46dC8";
 
-// Aqua (1inch) — same on 13 chains
+// Aqua (1inch) - same on 13 chains
 export const AQUA: Address = "0x1111113ccf1426a8e30e2bff5e005d929bf6a90a";
 export const AQUA_ROUTER: Address =
   "0x111111338c5091e8440b67b168bae16a668ac0de";
@@ -28,12 +28,7 @@ export const KNOWN_TOKENS: Address[] = [
   "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", // cbBTC
 ];
 
-// In production, /backend/* is proxied via Next.js rewrites to the VM
-// In dev, hit localhost directly
-export const API_URL =
-  typeof window !== "undefined" && window.location.hostname !== "localhost"
-    ? "/backend"
-    : "http://localhost:3001";
+export const API_URL = "";
 
 export const SELECTORS = {
   aquaShip: "0xf50b870f" as Hex,
@@ -133,6 +128,13 @@ export const caliburAbi = [
     inputs: [{ name: "key", type: "uint256" }],
     outputs: [{ name: "", type: "uint256" }],
   },
+  {
+    name: "revoke",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "keyHash", type: "bytes32" }],
+    outputs: [],
+  },
 ] as const;
 
 // ── GuardedExecutorHook ABI ───────────��───────────────────────────────────
@@ -152,7 +154,7 @@ export const hookAbi = [
 ] as const;
 
 // ── Calibur update() ABI (for setting hook on key) ──────────────────────
-// Settings is `type Settings is uint256` in Solidity — a packed uint256, NOT a struct.
+// Settings is `type Settings is uint256` in Solidity - a packed uint256, NOT a struct.
 // Layout: bits 0-159 = hook address, bits 160-199 = expiry (uint40), bit 200 = isAdmin
 // Pack as: (expiry << 160n) | BigInt(hookAddress)
 export const caliburUpdateAbi = [

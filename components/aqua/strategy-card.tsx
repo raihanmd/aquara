@@ -175,7 +175,7 @@ export function StrategyCard({
             Volume (24h)
           </div>
           <div className="text-sm font-semibold tracking-tight mt-0.5">
-            {volume != null ? formatUSD(volume) : "—"}
+            {volume != null ? formatUSD(volume) : "-"}
           </div>
         </div>
         <div className="text-right">
@@ -183,7 +183,7 @@ export function StrategyCard({
             Size
           </div>
           <div className="text-sm font-semibold tracking-tight mt-0.5">
-            {sizeUsd != null ? formatUSD(sizeUsd) : "—"}
+            {sizeUsd != null ? formatUSD(sizeUsd) : "-"}
           </div>
         </div>
       </div>

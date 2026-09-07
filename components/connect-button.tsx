@@ -15,7 +15,7 @@ export function ConnectButton() {
         onClick={() => disconnect()}
         variant="outline"
         size="sm"
-        className="group gap-2 bg-muted/30 text-foreground/80 hover:bg-muted/50 border-border/40"
+        className="group gap-2 bg-muted/30 text-foreground/80 hover:bg-muted/50 border-border/40 ml-auto"
       >
         <span className="size-1.5 rounded-full bg-emerald-500 group-hover:bg-red-400 transition-colors" />
         <span className="group-hover:hidden">
@@ -37,7 +37,7 @@ export function ConnectButton() {
       disabled={isPending}
       variant="default"
       size="sm"
-      className="bg-foreground text-background hover:bg-foreground/90 border-border/40"
+      className="bg-foreground text-background hover:bg-foreground/90 border-border/40 ml-auto"
     >
       {isPending ? "Connecting..." : "Connect Wallet"}
     </Button>

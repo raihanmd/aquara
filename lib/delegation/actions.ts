@@ -1,5 +1,5 @@
 /**
- * Delegation Actions — builds the calldata for the delegation transaction.
+ * Delegation Actions - builds the calldata for the delegation transaction.
  *
  * Single-tx flow:
  *   authorizationList: [Calibur 7702 delegation]
@@ -54,7 +54,7 @@ interface DelegationParams {
   extraTokens?: Address[];
 }
 
-interface Call {
+export interface Call {
   to: Address;
   value: bigint;
   data: Hex;
@@ -186,7 +186,7 @@ export function buildDelegationCalls(params: DelegationParams): Call[] {
     });
   }
 
-  // 3. Update key settings (self-call) — set expiry + hook
+  // 3. Update key settings (self-call) - set expiry + hook
   // Settings is packed uint256: (expiry << 160) | hookAddress
   const expiry = BigInt(Math.floor(Date.now() / 1000) + expirySeconds);
   const packedSettings = (expiry << 160n) | BigInt(GUARDED_EXECUTOR_HOOK);
@@ -253,7 +253,7 @@ export function buildHookSetupCalldata(params: {
     calls.push({ to: GUARDED_EXECUTOR_HOOK, value: 0n, data });
   }
 
-  // Update key settings — packed uint256: (expiry << 160) | hookAddress
+  // Update key settings - packed uint256: (expiry << 160) | hookAddress
   const expiry = BigInt(Math.floor(Date.now() / 1000) + expirySeconds);
   const packedSettings = (expiry << 160n) | BigInt(GUARDED_EXECUTOR_HOOK);
   const updateData = encodeFunctionData({
@@ -268,4 +268,13 @@ export function buildHookSetupCalldata(params: {
     functionName: "execute",
     args: [{ calls, revertOnFailure: true }],
   });
+}
+
+export function buildRevokeCall(userAddress: Address, keyHash: Hex): Call {
+  const data = encodeFunctionData({
+    abi: caliburAbi,
+    functionName: "revoke",
+    args: [keyHash],
+  });
+  return { to: userAddress, value: 0n, data };
 }

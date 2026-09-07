@@ -149,37 +149,24 @@ function normalizeAquaPosition(
   };
 }
 
-// ── Fetch ─────────────────────────────────────────────────────────────────
-const AQUA_BASE = "https://api.1inch.com/aqua/v1.0";
-
+// ── Fetch via same-origin relayer (key stays server-side) ───────────────────
 async function fetchAquaPositionsForMaker(
   maker: string,
-  apiKey: string,
 ): Promise<EnrichedAquaPosition[]> {
-  const params = new URLSearchParams({
-    limit: "20",
-    chainIds: "8453",
-  });
+  const params = new URLSearchParams({ maker, limit: "20", chainIds: "8453" });
 
-  const res = await fetch(
-    `${AQUA_BASE}/strategies/makers/${maker}?${params.toString()}`,
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-    },
-  );
+  const res = await fetch(`/api/aqua/positions?${params.toString()}`);
 
   if (!res.ok) {
-    throw new Error(`Aqua API error: ${res.status} ${res.statusText}`);
+    throw new Error(`Positions API error: ${res.status}`);
   }
 
   const json = await res.json();
-  const items: Record<string, unknown>[] = Array.isArray(json)
-    ? json
-    : (json.items ?? json.data ?? json.result ?? []);
+  const items: Record<string, unknown>[] = Array.isArray(json.items)
+    ? json.items
+    : [];
 
-  if (!Array.isArray(items) || items.length === 0) return [];
+  if (items.length === 0) return [];
 
   return items.map((item) =>
     normalizeAquaPosition(item as Record<string, unknown>),
@@ -189,7 +176,7 @@ async function fetchAquaPositionsForMaker(
 // ── Hook ──────────────────────────────────────────────────────────────────
 
 /**
- * CRE rebalance reference — batch pattern for ship/dock:
+ * CRE rebalance reference - batch pattern for ship/dock:
  *   batch [approve(token0, Aqua, amount), approve(token1, Aqua, amount), ship(app, strategy, tokens, amounts)]
  * The Aqua ship requires both tokens approved to Aqua (0x1111113ccf1426a8e30e2bff5e005d929bf6a90a)
  * before calling ship. For CRE, encode as a single BatchedCall with 3 calls:
@@ -207,24 +194,13 @@ export function useMyAquaPositions() {
   const [effectiveMaker, setEffectiveMaker] = useState<string | null>(null);
 
   const fetchPositions = useCallback(async (maker: string) => {
-    const apiKey = process.env.NEXT_PUBLIC_1INCH_API_KEY;
-    if (!apiKey) {
-      throw new Error("Missing NEXT_PUBLIC_1INCH_API_KEY");
-    }
-    return fetchAquaPositionsForMaker(maker, apiKey);
+    return fetchAquaPositionsForMaker(maker);
   }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      const apiKey = process.env.NEXT_PUBLIC_1INCH_API_KEY;
-      if (!apiKey) {
-        setError("Missing NEXT_PUBLIC_1INCH_API_KEY");
-        setIsLoading(false);
-        return;
-      }
-
       if (!address) {
         setPositions([]);
         setEffectiveMaker(null);
@@ -259,11 +235,6 @@ export function useMyAquaPositions() {
   }, [address, fetchPositions]);
 
   const refresh = useCallback(async () => {
-    const apiKey = process.env.NEXT_PUBLIC_1INCH_API_KEY;
-    if (!apiKey) {
-      setError("Missing NEXT_PUBLIC_1INCH_API_KEY");
-      return;
-    }
     if (!address) {
       setPositions([]);
       setEffectiveMaker(null);

@@ -56,7 +56,7 @@ export async function ensureBaseChain(): Promise<void> {
         );
       }
     } else if (switchErr?.code === 4001) {
-      throw new Error("Chain switch rejected — please switch to Base (8453) to continue.");
+      throw new Error("Chain switch rejected - please switch to Base (8453) to continue.");
     } else if (
       switchErr?.code === -32603 ||
       switchErr?.message?.toLowerCase().includes("unsupported")

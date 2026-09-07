@@ -10,10 +10,7 @@ export const KNOWN_TOKENS: Address[] = [
   "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
 ];
 
-export const API_URL =
-  typeof window !== "undefined" && window.location.hostname !== "localhost"
-    ? "/backend"
-    : "http://localhost:3001";
+export const API_URL = "";
 
 export const SELECTORS = {
   aquaShip: "0xf50b870f" as Hex,
