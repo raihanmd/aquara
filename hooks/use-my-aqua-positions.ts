@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useAccount } from "wagmi";
 
 // ── Demo address (user's deployed ship on Base) ──────────────────────────
@@ -188,78 +188,22 @@ async function fetchAquaPositionsForMaker(
 
 export function useMyAquaPositions() {
   const { address } = useAccount();
-  const [positions, setPositions] = useState<EnrichedAquaPosition[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [effectiveMaker, setEffectiveMaker] = useState<string | null>(null);
 
-  const fetchPositions = useCallback(async (maker: string) => {
-    return fetchAquaPositionsForMaker(maker);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      if (!address) {
-        setPositions([]);
-        setEffectiveMaker(null);
-        setIsLoading(false);
-        return;
-      }
-
-      setIsLoading(true);
-      setError(null);
-
-      try {
-        const walletPositions = await fetchPositions(address);
-        if (cancelled) return;
-        setPositions(walletPositions);
-        setEffectiveMaker(address);
-      } catch (err) {
-        if (cancelled) return;
-        const msg =
-          err instanceof Error ? err.message : "Failed to fetch Aqua positions";
-        setError(msg);
-        console.error("[useMyAquaPositions]", err);
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    }
-
-    load();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [address, fetchPositions]);
-
-  const refresh = useCallback(async () => {
-    if (!address) {
-      setPositions([]);
-      setEffectiveMaker(null);
-      return;
-    }
-    setIsLoading(true);
-    setError(null);
-    try {
-      const walletPositions = await fetchPositions(address);
-      setPositions(walletPositions);
-      setEffectiveMaker(address);
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Failed to fetch Aqua positions";
-      setError(msg);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [address, fetchPositions]);
+  const query = useQuery({
+    queryKey: ["aqua", "my-positions", address] as const,
+    queryFn: () => fetchAquaPositionsForMaker(address as string),
+    staleTime: 60_000,
+    retry: 1,
+    enabled: !!address,
+  });
 
   return {
-    positions,
-    isLoading,
-    error,
-    effectiveMaker,
-    refresh,
+    positions: (query.data ?? []) as EnrichedAquaPosition[],
+    isLoading: query.isLoading,
+    error: (query.error as Error | null)?.message ?? null,
+    effectiveMaker: (address ?? null) as string | null,
+    refresh: async () => {
+      await query.refetch();
+    },
   };
 }

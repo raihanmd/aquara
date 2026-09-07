@@ -182,7 +182,7 @@ export function StrategyCard({
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-medium">
             Size
           </div>
-          <div className="text-sm font-semibold tracking-tight mt-0.5">
+          <div className="text-lg font-semibold tracking-tight mt-0.5">
             {sizeUsd != null ? formatUSD(sizeUsd) : "-"}
           </div>
         </div>
