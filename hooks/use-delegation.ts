@@ -34,6 +34,9 @@ import {
   computeKeyHash,
   buildDelegationCalls,
   buildRevokeCall,
+  parse7702Target,
+  verifyCaliburAccount,
+  readCaliburDomain,
 } from "@/lib/delegation/actions";
 export type DelegationStatus =
   | "unknown"
@@ -41,15 +44,9 @@ export type DelegationStatus =
   | "delegated"
   | "checking";
 
-function isCaliburDelegated(code: string | undefined): boolean {
-  if (!code || code === "0x" || code.length <= 4) return false;
-  const caliburLower = CALIBUR_ADDRESS.toLowerCase().slice(2);
-  return code.toLowerCase().startsWith("0xef0100" + caliburLower);
-}
-
 export function useDelegation() {
   const { address } = useAccount();
-  const publicClient = usePublicClient();
+  const publicClient = usePublicClient({ chainId: base.id });
   const { data: walletClient } = useWalletClient();
   const chainId = useChainId();
   const { switchChainAsync } = useSwitchChain();
@@ -104,17 +101,11 @@ export function useDelegation() {
     );
 
     async function checkDelegationOnce() {
-      const code = await client.getCode({ address: userAddress });
-      const hasCal = isCaliburDelegated(code);
-      setHasCaliburCode(hasCal);
-      const codeLower = (code ?? "").toLowerCase();
-      if (codeLower.startsWith("0xef0100") && codeLower.length >= 48) {
-        setDelegatedTo(("0x" + codeLower.slice(8, 48)) as Address);
-      } else {
-        setDelegatedTo(null);
-      }
+      const impl = await verifyCaliburAccount(client, userAddress);
+      setHasCaliburCode(!!impl);
+      setDelegatedTo(impl);
 
-      if (!hasCal) {
+      if (!impl) {
         setStatus("not-delegated");
         return;
       }
@@ -216,7 +207,7 @@ export function useDelegation() {
       } as any);
       await publicClient.waitForTransactionReceipt({ hash });
       const code = await publicClient.getCode({ address });
-      if (!isCaliburDelegated(code)) {
+      if (parse7702Target(code)?.toLowerCase() !== CALIBUR_ADDRESS.toLowerCase()) {
         setError("7702 delegation failed - code not set. Try again.");
         return false;
       }
@@ -256,6 +247,11 @@ export function useDelegation() {
       const provider = (window as any).ethereum;
       if (!provider) throw new Error("No wallet provider");
 
+      const code = await publicClient.getCode({ address });
+      const impl = parse7702Target(code);
+      if (!impl) throw new Error("Account is not a Calibur smart wallet");
+      const caliburDomain = await readCaliburDomain(publicClient, address, impl);
+
       const seq = (await publicClient.readContract({
         address,
         abi: caliburAbi,
@@ -280,11 +276,11 @@ export function useDelegation() {
       };
 
       const domain = {
-        name: "Calibur",
-        version: "1.0.0",
-        chainId: 8453,
+        name: caliburDomain.name,
+        version: caliburDomain.version,
+        chainId: caliburDomain.chainId,
         verifyingContract: address,
-        salt: "0x000000000000000000000000000000009b1d0af20d8c6d0a44e162d11f9b8f00",
+        salt: caliburDomain.salt,
       };
 
       const signature: Hex = await provider.request({
@@ -312,7 +308,7 @@ export function useDelegation() {
       const res = await fetch(`${API_URL}/api/delegate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userAddress: address, signedBatchedCall, signature }),
+        body: JSON.stringify({ userAddress: address, signedBatchedCall, signature, domain }),
       });
 
       const result = await res.json();
@@ -344,14 +340,13 @@ export function useDelegation() {
         await ensureBaseChain();
 
         stage = "read-code";
-        const code = await publicClient.getCode({ address });
-        if (!isCaliburDelegated(code)) {
-          const codeLower = (code ?? "").toLowerCase();
-          if (codeLower.startsWith("0xef0100") && codeLower.length >= 48) {
-            const target = "0x" + codeLower.slice(8, 48);
+        const impl = await verifyCaliburAccount(publicClient, address);
+        if (!impl) {
+          const raw = parse7702Target(await publicClient.getCode({ address }));
+          if (raw) {
             throw new Error(
-              `This account is already a smart wallet delegated to ${target}, not Calibur. ` +
-                "Please connect the Uniswap Wallet account with Smart Wallet enabled (it delegates to Calibur automatically)."
+              `This account is a smart wallet delegated to ${raw}, which is not Calibur. ` +
+                "Connect a Calibur smart wallet (Uniswap Wallet enables it automatically) or an undelegated EOA."
             );
           }
           const ok7702 = await perform7702Delegation();
