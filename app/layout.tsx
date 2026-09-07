@@ -7,7 +7,7 @@ import "./globals.css";
 import { Toaster } from "sonner";
 
 export const metadata: Metadata = {
-  title: "Aqua EZ",
+  title: "Aquara",
   description: "AI manager for 1inch Aqua - shared liquidity made easy",
 };
 
