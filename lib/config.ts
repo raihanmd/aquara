@@ -19,10 +19,10 @@ export const SELECTORS = {
 };
 
 export const QUIRKY_MESSAGES = [
-  "Watching your positions...",
-  "Markets never sleep, neither do I.",
-  "Your liquidity, optimized.",
-  "Keeping your ranges tight.",
-  "Fees are accumulating nicely.",
-  "All systems operational.",
+  "Watching your liquidity...",
+  "Aquara never sleeps.",
+  "Capital at work, ranges in check.",
+  "Tuning positions for max fees.",
+  "Fees flow while you rest.",
+  "All pools nominal.",
 ];
