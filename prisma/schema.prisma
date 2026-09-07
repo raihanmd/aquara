@@ -46,3 +46,59 @@ model AquaCache {
 
   @@map("aqua_cache")
 }
+
+model AgentDecision {
+  id           String   @id @default(cuid())
+  maker        String   @db.VarChar(42)
+  chainId      Int      @default(8453)
+  strategyHash String   @db.VarChar(66)
+  pair         String   @db.VarChar(64)
+  action       String   @db.VarChar(16)
+  reason       String   @db.Text
+  volume24h    Float?
+  apy          Float?
+  txHash       String?  @db.VarChar(66)
+  createdAt    DateTime @default(now())
+
+  @@index([maker])
+  @@index([createdAt])
+  @@map("agent_decisions")
+}
+
+model ManagedStrategy {
+  strategyHash String   @id @db.VarChar(66)
+  maker        String   @db.VarChar(42)
+  chainId      Int      @default(8453)
+  mode         String   @db.VarChar(16)
+  capitalToken String   @db.VarChar(42)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([maker])
+  @@map("managed_strategies")
+}
+
+model MakerSettings {
+  maker     String   @id @db.VarChar(42)
+  slippage  Float    @default(0.5)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("maker_settings")
+}
+
+model AgentJob {
+  id        String   @id @default(cuid())
+  maker     String   @db.VarChar(42)
+  chainId   Int      @default(8453)
+  kind      String   @db.VarChar(16)
+  status    String   @db.VarChar(16)
+  steps     Json     @default("[]")
+  error     String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([maker])
+  @@index([status])
+  @@map("agent_jobs")
+}

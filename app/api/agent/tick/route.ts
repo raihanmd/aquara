@@ -190,6 +190,25 @@ export async function GET(req: Request) {
     }
   }
 
+  for (const d of decisions) {
+    try {
+      await prisma.agentDecision.create({
+        data: {
+          maker: d.maker.toLowerCase(),
+          chainId: d.chainId,
+          strategyHash: d.strategyHash,
+          pair: d.pair,
+          action: d.action,
+          reason: d.reason,
+          volume24h: d.volume24h,
+          apy: d.apy,
+        },
+      });
+    } catch (e) {
+      console.warn("[agent-tick] decision log failed:", (e as Error)?.message);
+    }
+  }
+
   const summary = {
     makers: makers.length,
     dock: decisions.filter((d) => d.action === "dock").length,
