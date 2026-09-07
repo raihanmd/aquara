@@ -7,8 +7,10 @@ import { useMyAquaPositions } from "@/hooks/use-my-aqua-positions";
 import { QUIRKY_MESSAGES } from "@/lib/config";
 import { TopPositions } from "@/components/aqua/top-positions";
 import { SharedCapital } from "@/components/aqua/shared-capital";
+import { AgentActivity } from "@/components/aqua/agent-activity";
 import { AquaPositionCard } from "./aqua-position-card";
 import { DelegationStepper } from "@/components/delegation/delegation-stepper";
+import { DeployDialog } from "@/components/aqua/deploy-dialog";
 import { Button } from "@/components/ui/button";
 
 const PAGE_SIZE = 9;
@@ -47,11 +49,37 @@ function netSizeUsd(
 
 export function PositionsGrid() {
   const { positions, isLoading, error, effectiveMaker } = useMyAquaPositions();
-  const { status: delegationStatus, revoke, isSubmitting: isRevoking } = useDelegation();
+  const {
+    status: delegationStatus,
+    revoke,
+    isSubmitting: isRevoking,
+    checkDelegation,
+  } = useDelegation();
   const [page, setPage] = useState(0);
   const [message, setMessage] = useState("");
   const [delegateOpen, setDelegateOpen] = useState(false);
+  const [deployOpen, setDeployOpen] = useState(false);
+  const [modeMap, setModeMap] = useState<Record<string, string>>({});
   const isDelegated = delegationStatus === "delegated";
+
+  useEffect(() => {
+    if (!delegateOpen) checkDelegation();
+  }, [delegateOpen, checkDelegation]);
+
+  useEffect(() => {
+    if (!effectiveMaker) return;
+    fetch(`/api/strategies?maker=${effectiveMaker}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows) => {
+        const m: Record<string, string> = {};
+        for (const row of rows ?? []) {
+          if (row?.strategyHash)
+            m[String(row.strategyHash).toLowerCase()] = row.mode;
+        }
+        setModeMap(m);
+      })
+      .catch(() => {});
+  }, [effectiveMaker]);
 
   useEffect(() => {
     if (!isDelegated || !effectiveMaker) return;
@@ -74,11 +102,11 @@ export function PositionsGrid() {
     const oor = positions.filter((p) => p.isOutOfRange);
     if (oor.length > 0) {
       setMessage(
-        `${oor.length} of ${positions.length} position${positions.length !== 1 ? "s" : ""} out of range. On it.`,
+        `${oor.length} of ${positions.length} position${positions.length !== 1 ? "s" : ""} out of range. Aquara is on it.`,
       );
     } else {
       setMessage(
-        `All ${positions.length} position${positions.length !== 1 ? "s" : ""} in range. Looking good.`,
+        `All ${positions.length} position${positions.length !== 1 ? "s" : ""} in range. Compounding quietly.`,
       );
     }
   }, [positions, isLoading]);
@@ -103,7 +131,7 @@ export function PositionsGrid() {
       <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">
-            Aqua Command
+            Aquara
           </div>
           <h1 className="text-2xl font-semibold tracking-tight mt-1">
             {message}
@@ -116,7 +144,7 @@ export function PositionsGrid() {
           )}
         </div>
 
-        {positions.length > 0 && (
+        {!isLoading && (
           <div className="flex items-center gap-4">
             <div className="text-right">
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-medium">
@@ -127,7 +155,8 @@ export function PositionsGrid() {
               </div>
             </div>
 
-            {delegationStatus === "unknown" || delegationStatus === "checking" ? (
+            {delegationStatus === "unknown" ||
+            delegationStatus === "checking" ? (
               <div className="flex items-center gap-2 rounded-full bg-muted px-3 py-2 text-xs text-muted-foreground">
                 <span className="size-3 rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60 animate-spin" />
                 Checking pass…
@@ -141,19 +170,28 @@ export function PositionsGrid() {
                 Delegate to agent
               </Button>
             ) : (
-              <button
-                onClick={() => revoke()}
-                disabled={isRevoking}
-                className="group flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 cursor-pointer"
-              >
-                <span className="size-1.5 rounded-full bg-current group-hover:bg-current" />
-                <span className="group-hover:hidden">
-                  {isRevoking ? "Revoking…" : "Agent active"}
-                </span>
-                <span className="hidden group-hover:inline">
-                  {isRevoking ? "Revoking…" : "Deactivate"}
-                </span>
-              </button>
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={() => setDeployOpen(true)}
+                  variant="default"
+                  className="rounded-full"
+                >
+                  Deploy strategy
+                </Button>
+                <button
+                  onClick={() => revoke()}
+                  disabled={isRevoking}
+                  className="group flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 cursor-pointer"
+                >
+                  <span className="size-1.5 rounded-full bg-current group-hover:bg-current" />
+                  <span className="group-hover:hidden">
+                    {isRevoking ? "Revoking…" : "Agent active"}
+                  </span>
+                  <span className="hidden group-hover:inline">
+                    {isRevoking ? "Revoking…" : "Deactivate"}
+                  </span>
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -237,17 +275,28 @@ export function PositionsGrid() {
         )}
 
         {!isLoading && !error && positions.length > 0 && (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
             {slots.map((slot, idx) => {
               if (slot.type === "position") {
                 return (
                   <AquaPositionCard
                     key={slot.position.strategyHash + idx}
                     position={slot.position}
+                    mode={
+                      modeMap[
+                        (slot.position.strategyHash ?? "").toLowerCase()
+                      ] ?? null
+                    }
                   />
                 );
               }
             })}
+          </div>
+        )}
+
+        {!isLoading && !error && effectiveMaker && (
+          <div>
+            <AgentActivity maker={effectiveMaker} />
           </div>
         )}
       </div>
@@ -257,6 +306,7 @@ export function PositionsGrid() {
         onOpenChange={setDelegateOpen}
         mode={positions.map((p) => p.strategyHash)}
       />
+      <DeployDialog open={deployOpen} onOpenChange={setDeployOpen} />
     </div>
   );
 }

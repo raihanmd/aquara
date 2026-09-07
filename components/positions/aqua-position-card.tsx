@@ -30,7 +30,13 @@ function tokenUsd(t: EnrichedAquaPosition["tokens"][number]): number {
   return 0;
 }
 
-export function AquaPositionCard({ position }: { position: EnrichedAquaPosition }) {
+export function AquaPositionCard({
+  position,
+  mode,
+}: {
+  position: EnrichedAquaPosition;
+  mode?: string | null;
+}) {
   const oor = position.isOutOfRange;
   const u0 = tokenUsd(position.tokens[0]);
   const u1 = tokenUsd(position.tokens[1]);
@@ -71,15 +77,26 @@ export function AquaPositionCard({ position }: { position: EnrichedAquaPosition 
       sizeUsd={sizeUsd}
       showBreakdown={hasBreakdown}
       badge={
-        oor ? (
-          <Badge variant="destructive" className="rounded-md px-2 py-0.5 text-[10px] font-medium">
-            Out of Range
-          </Badge>
-        ) : (
-          <Badge className="rounded-md bg-green-500/15 text-green-600 border-transparent px-2 py-0.5 text-[10px] font-medium">
-            In Range
-          </Badge>
-        )
+        <>
+          {oor ? (
+            <Badge variant="destructive" className="rounded-md px-2 py-0.5 text-[10px] font-medium">
+              Out of Range
+            </Badge>
+          ) : (
+            <Badge className="rounded-md bg-green-500/15 text-green-600 border-transparent px-2 py-0.5 text-[10px] font-medium">
+              In Range
+            </Badge>
+          )}
+          {mode === "aggressive" ? (
+            <Badge className="rounded-md bg-amber-500/15 text-amber-600 border-transparent px-2 py-0.5 text-[10px] font-medium">
+              Aggressive
+            </Badge>
+          ) : mode === "conservative" ? (
+            <Badge variant="outline" className="rounded-md px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              Stable
+            </Badge>
+          ) : null}
+        </>
       }
       extra={
         position.priceRange?.lower !== undefined || position.priceRange?.upper !== undefined ? (
