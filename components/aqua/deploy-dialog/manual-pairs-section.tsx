@@ -54,15 +54,17 @@ export const ManualPairsSection = memo(function ManualPairsSection({
                 (t) => t.address.toLowerCase() === p.tokenB.toLowerCase(),
               )?.symbol ?? p.tokenB.slice(0, 6);
             return (
-              <button
+              <Button
                 key={`${p.tokenA}-${p.tokenB}-${i}`}
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={() => removeAt(i)}
                 title="Remove pair"
-                className="flex items-center gap-1.5 rounded-full border border-border/50 bg-muted/30 px-2.5 py-1 text-xs transition-colors hover:border-destructive/50 hover:text-destructive cursor-pointer"
+                className="h-auto rounded-full border border-border/50 bg-muted/30 px-2.5 py-1 text-xs font-normal hover:border-destructive/50 hover:text-destructive"
               >
                 {s0} / {s1} ✕
-              </button>
+              </Button>
             );
           })}
         </div>

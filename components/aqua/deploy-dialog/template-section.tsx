@@ -2,6 +2,7 @@
 
 import { memo } from "react";
 import { useWatch, useFormContext } from "react-hook-form";
+import { Button } from "@/components/ui/button";
 import { StrategyCard } from "@/components/aqua/strategy-card";
 import { cn } from "@/lib/utils";
 import type { TopPosition } from "@/hooks/use-top-positions";
@@ -43,14 +44,15 @@ export const TemplateSection = memo(function TemplateSection({
           const u1 = topTokenUsd(p.tokens?.[1]);
           const active = picked.includes(p.strategyHash);
           return (
-            <button
+            <Button
               key={p.strategyHash}
               type="button"
+              variant="ghost"
               onClick={() => toggle(p.strategyHash)}
               aria-pressed={active}
               aria-label={`${p.tokens?.[0]?.symbol} ${p.tokens?.[1]?.symbol}`}
               className={cn(
-                "rounded-xl text-left transition-colors cursor-pointer",
+                "h-auto w-full rounded-xl p-0 text-left font-normal px-0",
                 active &&
                   "ring-2 ring-primary ring-offset-2 ring-offset-background",
               )}
@@ -85,7 +87,7 @@ export const TemplateSection = memo(function TemplateSection({
                 sizeUsd={u0 + u1 > 0 ? u0 + u1 : null}
                 showBreakdown={false}
               />
-            </button>
+            </Button>
           );
         })}
       </div>
