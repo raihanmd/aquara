@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usePublicClient } from "wagmi";
 import { base } from "wagmi/chains";
 import type { Address } from "viem";
@@ -65,12 +65,10 @@ export function PositionsGrid() {
   const [delegateOpen, setDelegateOpen] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
   const [modeMap, setModeMap] = useState<Record<string, string>>({});
-  const [allowMap, setAllowMap] = useState<Record<string, string>>({});
   const [rangeMap, setRangeMap] = useState<
     Record<string, { min: string; max: string }>
   >({});
-  const [modesLoaded, setModesLoaded] = useState(false);
-  const markedRef = useRef<Set<string>>(new Set());
+  const [allowMap, setAllowMap] = useState<Record<string, string>>({});
   const isDelegated = delegationStatus === "delegated";
 
   const publicClient = usePublicClient({ chainId: base.id });
@@ -96,8 +94,7 @@ export function PositionsGrid() {
         setModeMap(m);
         setRangeMap(r);
       })
-      .catch(() => {})
-      .finally(() => setModesLoaded(true));
+      .catch(() => {});
   }, [effectiveMaker]);
 
   useEffect(() => {
@@ -145,46 +142,6 @@ export function PositionsGrid() {
       cancelled = true;
     };
   }, [effectiveMaker, publicClient, positions]);
-
-  useEffect(() => {
-    if (
-      !isDelegated ||
-      !modesLoaded ||
-      !effectiveMaker ||
-      positions.length === 0
-    )
-      return;
-    const missing = positions
-      .map((p) => (p.strategyHash ?? "").toLowerCase())
-      .filter(
-        (h) => h && modeMap[h] === undefined && !markedRef.current.has(h),
-      );
-    if (missing.length === 0) return;
-    for (const h of missing) markedRef.current.add(h);
-    (async () => {
-      const marked: Record<string, string> = {};
-      for (const h of missing) {
-        try {
-          const r = await fetch("/api/strategies", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              strategyHash: h,
-              maker: effectiveMaker,
-              mode: "conservative",
-            }),
-          });
-          if (r.ok) marked[h] = "conservative";
-          else markedRef.current.delete(h);
-        } catch {
-          markedRef.current.delete(h);
-        }
-      }
-      if (Object.keys(marked).length > 0) {
-        setModeMap((prev) => ({ ...prev, ...marked }));
-      }
-    })();
-  }, [isDelegated, modesLoaded, effectiveMaker, positions, modeMap]);
 
   useEffect(() => {
     if (!isDelegated || !effectiveMaker) return;

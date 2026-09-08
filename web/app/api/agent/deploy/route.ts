@@ -711,7 +711,7 @@ export async function POST(req: Request) {
               if (plan.strategyHash) {
                 await prisma.managedStrategy.upsert({
                   where: { strategyHash: plan.strategyHash },
-                  update: { mode, priceMin: plan.range?.min ?? null, priceMax: plan.range?.max ?? null },
+                  update: { mode, priceMin: plan.range?.min ?? null, priceMax: plan.range?.max ?? null, strategyBytes: plan.strategy, tokenA: plan.tokenA.toLowerCase(), tokenB: plan.tokenB.toLowerCase() },
                   create: {
                     strategyHash: plan.strategyHash,
                     maker: maker.toLowerCase(),
@@ -720,6 +720,9 @@ export async function POST(req: Request) {
                     capitalToken: capital.toLowerCase(),
                     priceMin: plan.range?.min ?? null,
                     priceMax: plan.range?.max ?? null,
+                    strategyBytes: plan.strategy,
+                    tokenA: plan.tokenA.toLowerCase(),
+                    tokenB: plan.tokenB.toLowerCase(),
                   },
                 });
                 await prisma.agentDecision.create({

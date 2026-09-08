@@ -1,0 +1,15 @@
+{
+  "schedule": "*/30 * * * * *",
+  "makers": ["0x08Dc514b8bA9015a74972Da8bDa5027fD91943e1"],
+  "apiBase": "http://localhost:3000/api",
+  "router": "0x111111338c5091e8440b67b168bae16a668ac0de",
+  "aquaRegistry": "0x1111113ccf1426a8e30e2bff5e005d929bf6a90a",
+  "app": "0x111111338c5091e8440b67b168bae16a668ac0de",
+  "probeAmountRaw": "100000",
+  "chainSelectorName": "ethereum-mainnet-base-1",
+  "aiApiUrl": "https://ai.raihanmd.xyz/v1/chat/completions",
+  "aiModel": "n8n-1",
+  "aiApiKeySecretId": "AI_API_KEY",
+  "aiApiKeyOwner": "0x5235401AbA9b0f597A19B48497bf174a4dA8A090",
+  "aiEnabled": true
+}
