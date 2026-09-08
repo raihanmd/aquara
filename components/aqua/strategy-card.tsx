@@ -20,6 +20,7 @@ interface StrategyCardProps {
   tokens: StrategyTokenVM[];
   fee: string | null;
   apy: number | null;
+  earned?: number | null;
   volume: number | null;
   sizeUsd: number | null;
   showBreakdown?: boolean;
@@ -84,11 +85,17 @@ export function TokenBalanceBar({
     >
       <div
         className="h-full rounded-full"
-        style={{ width: `${percent0}%`, backgroundColor: getTokenColor(token0Symbol) }}
+        style={{
+          width: `${percent0}%`,
+          backgroundColor: getTokenColor(token0Symbol),
+        }}
       />
       <div
         className="h-full rounded-full"
-        style={{ width: `${100 - percent0}%`, backgroundColor: getTokenColor(token1Symbol) }}
+        style={{
+          width: `${100 - percent0}%`,
+          backgroundColor: getTokenColor(token1Symbol),
+        }}
       />
     </div>
   );
@@ -105,6 +112,7 @@ export function StrategyCard({
   tokens,
   fee,
   apy,
+  earned,
   volume,
   sizeUsd,
   showBreakdown = true,
@@ -121,53 +129,69 @@ export function StrategyCard({
   return (
     <Card
       className={cn(
-        "group relative flex flex-col gap-0 px-4 pt-3 pb-3 rounded-xl border border-border/50 bg-card",
+        "group relative flex flex-col gap-0 px-4 pt-3 pb-3 rounded-xl border border-border/50 bg-card w-full",
         "transition-all duration-200",
         "hover:border-border hover:bg-card/80 hover:-translate-y-0.5 hover:shadow-(--shadow-card)",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
       )}
       tabIndex={0}
       role="article"
       aria-label={`${pair} strategy`}
     >
-      {badge && (
-        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5">{badge}</div>
-      )}
-
-      <div className={cn("flex items-center gap-2 mb-2", badge && "pr-20")}>
-        {rank != null && (
-          <Badge
-            variant="default"
-            className="flex size-6 shrink-0 items-center justify-center rounded-full p-0 text-xs font-semibold bg-primary text-primary-foreground"
-            aria-hidden="true"
-          >
-            {rank}
-          </Badge>
-        )}
-        <div className="flex -space-x-1">
-          <TokenIcon token={t0 as never} size={20} />
-          <TokenIcon token={t1 as never} size={20} />
+      <div
+        className={cn("flex items-center justify-between w-full gap-2 mb-2")}
+      >
+        <div className="flex items-center justify-start gap-2">
+          {rank != null && (
+            <Badge
+              variant="default"
+              className="flex size-6 shrink-0 items-center justify-center rounded-full p-0 text-xs font-semibold bg-primary text-primary-foreground"
+              aria-hidden="true"
+            >
+              {rank}
+            </Badge>
+          )}
+          <div className="flex -space-x-1">
+            <TokenIcon token={t0 as never} size={20} />
+            <TokenIcon token={t1 as never} size={20} />
+          </div>
+          <span className="text-sm font-medium tracking-tight truncate">
+            {pair}
+          </span>
+          {fee && (
+            <Badge
+              variant="muted"
+              className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground border-transparent"
+            >
+              {fee}
+            </Badge>
+          )}
         </div>
-        <span className="text-sm font-medium tracking-tight truncate">{pair}</span>
-        {fee && (
-          <Badge
-            variant="muted"
-            className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground border-transparent"
-          >
-            {fee}
-          </Badge>
-        )}
-        {headerRight && <span className="ml-auto shrink-0">{headerRight}</span>}
+        <div>
+          {badge && <div className="flex items-center gap-1.5">{badge}</div>}
+          {headerRight && (
+            <span className="ml-auto shrink-0">{headerRight}</span>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-2 mb-2">
         <div>
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-medium">
-            APY (24h)
+            {earned != null ? "Earned" : "APY (24h)"}
           </div>
           <div className="text-sm font-semibold tracking-tight mt-0.5 flex items-center gap-1">
-            <TrendingUp className="size-3.5 text-primary" aria-hidden="true" />
-            {formatAPY(apy)}
+            {earned != null ? (
+              <span className={earned > 0 ? "text-green-600" : earned < 0 ? "text-destructive" : ""}>
+                {earned > 0 ? "+" : earned < 0 ? "-" : ""}
+                {formatUSD(Math.abs(earned))}
+              </span>
+            ) : (
+              <>
+                <TrendingUp className="size-3.5 text-primary" aria-hidden="true" />
+                {formatAPY(apy)}
+              </>
+            )}
           </div>
         </div>
         <div>
@@ -216,7 +240,9 @@ export function StrategyCard({
         </div>
       )}
 
-      {footer && <div className={showBreakdown ? "mt-2" : "mt-auto pt-2"}>{footer}</div>}
+      {footer && (
+        <div className={showBreakdown ? "mt-2" : "mt-auto pt-2"}>{footer}</div>
+      )}
     </Card>
   );
 }
