@@ -2,58 +2,14 @@
   "name": "aquara",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "dev": "next dev --turbo",
-    "build": "next build",
-    "start": "next start"
-  },
-  "dependencies": {
-    "@1inch/aqua-sdk": "^0.3.1",
-    "@1inch/swap-vm-sdk": "^0.4.1",
-    "@hookform/resolvers": "^5.9.1",
-    "@metamask/smart-accounts-kit": "^2.0.0",
-    "@prisma/client": "^6.0.0",
-    "@radix-ui/react-dialog": "^1.1.15",
-    "@radix-ui/react-toggle-group": "^1.1.19",
-    "@radix-ui/react-tooltip": "^1.2.8",
-    "@radix-ui/react-use-controllable-state": "^1.2.2",
-    "@tanstack/react-query": "^5.95.2",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "cmdk": "^1.1.1",
-    "date-fns": "^4.1.0",
-    "framer-motion": "^11.3.19",
-    "lucide-react": "^0.446.0",
-    "nanoid": "^5.1.16",
-    "next": "16.3.4",
-    "next-themes": "^0.3.0",
-    "radix-ui": "^1.4.3",
-    "react": "19.0.1",
-    "react-dom": "19.0.1",
-    "react-hook-form": "^7.87.0",
-    "sonner": "^1.5.0",
-    "tailwind-merge": "^2.5.2",
-    "tailwindcss-animate": "^1.0.7",
-    "viem": "^2.56.3",
-    "wagmi": "^3.7.7",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
-    "@tailwindcss/typography": "^0.5.15",
-    "@types/node": "^22.8.6",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "dotenv": "^17.4.2",
-    "postcss": "^8.5.28",
-    "prisma": "^6.0.0",
-    "tailwindcss": "^4.3.3",
-    "typescript": "^5.6.3"
-  },
-  "trustedDependencies": [
-    "@reown/appkit",
-    "bufferutil",
-    "utf-8-validate"
+  "description": "Aquara monorepo - AI liquidity manager for 1inch Aqua on Base",
+  "workspaces": [
+    "web",
+    "taker-bot"
   ],
-  "packageManager": "bun@1.4.0"
+  "scripts": {
+    "dev:web": "bun --cwd web dev",
+    "build:web": "bun --cwd web build",
+    "start:bot": "bun --cwd taker-bot start"
+  }
 }
