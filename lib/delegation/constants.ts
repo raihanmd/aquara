@@ -23,6 +23,12 @@ export const ONEINCH_V6_ROUTER: Address =
 // Verified on-chain against the deployed hook (ANY_FN_SEL() === 0x32323232).
 export const ANY_FN_SEL = "0x32323232" as Hex;
 
+// GuardedExecutorHook wildcard sentinel: matches any target address.
+// Verified on-chain (ANY_TARGET() === 0x3232323232323232323232323232323232323232).
+// Used for approve(): the agent may approve any token (amounts stay bounded by
+// key expiry + revoke; hook still gates every other selector per-target).
+export const ANY_TARGET: Address = "0x3232323232323232323232323232323232323232";
+
 // Legacy Uniswap (keep for reference, not used for Aqua)
 export const POSITION_MANAGER: Address =
   "0x7c5f5a4bbd8fd63184577525326123b519429bdc";
