@@ -7,27 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Delegation {
-  id             String   @id @default(cuid())
-  delegator      String   @db.VarChar(42)
-  delegate       String   @db.VarChar(42)
-  chainId        Int      @default(8453)
-  delegationJson Json
-  // alias: delegation field in API maps to delegationJson
-  signature      String   @db.Text
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  expiresAt      DateTime?
-  revoked        Boolean  @default(false)
-  revokedAt      DateTime?
-
-  @@index([delegator])
-  @@index([delegate])
-  @@index([chainId])
-  @@index([expiresAt])
-  @@map("delegations")
-}
-
 model ManagedUser {
   address   String   @id @db.VarChar(42)
   chainId   Int      @default(8453)
@@ -71,6 +50,8 @@ model ManagedStrategy {
   chainId      Int      @default(8453)
   mode         String   @db.VarChar(16)
   capitalToken String   @db.VarChar(42)
+  priceMin     String?  @db.VarChar(78)
+  priceMax     String?  @db.VarChar(78)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
