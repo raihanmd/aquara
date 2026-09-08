@@ -20,17 +20,27 @@ function formatUnits(raw: string, decimals: number): string {
 export const CapitalSection = memo(function CapitalSection({
   options,
   walletMap,
+  availableMap,
 }: {
   options: TokenOpt[];
   walletMap: Map<string, string>;
+  availableMap: Map<string, { available: string; allocated: string }>;
 }) {
   const { control, setValue } = useFormContext<FormValues>();
   const capital = useWatch({ control, name: "capital" });
+  const capitalAmount = useWatch({ control, name: "capitalAmount" });
 
   const capitalToken = options.find(
     (t) => t.address.toLowerCase() === (capital ?? "").toLowerCase(),
   );
   const walletRaw = walletMap.get((capital ?? "").toLowerCase());
+  const ledger = availableMap.get((capital ?? "").toLowerCase());
+  const overAllocated =
+    ledger !== undefined &&
+    capitalToken !== undefined &&
+    capitalAmount !== "" &&
+    Number(capitalAmount) > 0 &&
+    Number(ledger.available) / 10 ** capitalToken.decimals < Number(capitalAmount);
 
   const setPct = (pct: number) => {
     if (!walletRaw || !capitalToken) return;
@@ -62,7 +72,15 @@ export const CapitalSection = memo(function CapitalSection({
         {walletRaw && capitalToken
           ? formatUnits(walletRaw, capitalToken.decimals)
           : "-"}
+        {ledger && capitalToken && (
+          <> · Available: {formatUnits(ledger.available, capitalToken.decimals)}</>
+        )}
       </div>
+      {overAllocated && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-600">
+          Amount exceeds unallocated balance - part of it is already backing other strategies.
+        </div>
+      )}
       <div className="flex gap-1.5">
         {[25, 50, 75].map((p) => (
           <Button

@@ -28,13 +28,16 @@ import {
   type TokenOpt,
 } from "./deploy-dialog/schema";
 import { cn } from "@/lib/utils";
+import Link from "next/link";
 
 export function DeployDialog({
   open,
   onOpenChange,
+  onDone,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onDone?: () => void;
 }) {
   const { address } = useAccount();
   const { data: tops } = useTopPositions({
@@ -83,7 +86,7 @@ export function DeployDialog({
       .catch(() => {
         fetchedRef.current = false;
       });
-  }, [open ]);
+  }, [open]);
 
   const BAL_ABI = [
     {
@@ -113,7 +116,10 @@ export function DeployDialog({
         const m = new Map<string, string>();
         res.forEach((r, i) => {
           if (r.status === "success") {
-            m.set(list[i].address.toLowerCase(), (r.result as bigint).toString());
+            m.set(
+              list[i].address.toLowerCase(),
+              (r.result as bigint).toString(),
+            );
           }
         });
         setBalances(m);
@@ -154,6 +160,35 @@ export function DeployDialog({
     };
     return [...tokens].sort((a, b) => hasBal(b) - hasBal(a));
   }, [tokens, balanceMap]);
+
+  const availableMap = useMemo(() => {
+    const allocated = new Map<string, bigint>();
+    for (const p of positions) {
+      for (const t of (p as any)?.tokens ?? []) {
+        const addr = String(t?.address ?? "").toLowerCase();
+        const raw = t?.currentBalance?.raw ?? t?.walletBalance?.raw;
+        if (!addr || raw === undefined || raw === null) continue;
+        try {
+          allocated.set(
+            addr,
+            (allocated.get(addr) ?? 0n) + BigInt(String(raw)),
+          );
+        } catch {}
+      }
+    }
+    const m = new Map<string, { available: string; allocated: string }>();
+    for (const [addr, balRaw] of balanceMap) {
+      try {
+        const alloc = allocated.get(addr) ?? 0n;
+        const avail = BigInt(balRaw) - alloc;
+        m.set(addr, {
+          available: (avail > 0n ? avail : 0n).toString(),
+          allocated: alloc.toString(),
+        });
+      } catch {}
+    }
+    return m;
+  }, [balanceMap, positions]);
 
   const [liveSteps, setLiveSteps] = useState<
     Record<number, { stage: string; detail?: string; txHash?: string }>
@@ -218,6 +253,7 @@ export function DeployDialog({
       const decoder = new TextDecoder();
       let buf = "";
       const hashes: string[] = [];
+      let doneOk = false;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -248,7 +284,16 @@ export function DeployDialog({
           if (evt.done && evt.error) {
             throw new Error(evt.error);
           }
+          if (evt.done && !evt.error && Number(evt.ok ?? 0) > 0) {
+            doneOk = true;
+          }
         }
+      }
+      if (hashes.length > 0) onDone?.();
+      if (doneOk) {
+        form.reset();
+        setLiveSteps({});
+        setTxHashes([]);
       }
     } catch (e: any) {
       setSubmitError(e?.shortMessage || e?.message || "Deploy failed");
@@ -282,9 +327,13 @@ export function DeployDialog({
               disabled={busy}
               className="space-y-5 border-0 m-0 p-0 min-w-0 disabled:opacity-70"
             >
-            <CapitalSection options={sortedTokens} walletMap={balanceMap} />
-            <TemplateSection tops={tops ?? []} />
-            <ManualPairsSection tokens={sortedTokens} />
+              <CapitalSection
+                options={sortedTokens}
+                walletMap={balanceMap}
+                availableMap={availableMap}
+              />
+              <TemplateSection tops={tops ?? []} />
+              <ManualPairsSection tokens={sortedTokens} />
 
               <section className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2.5">
                 <div>
@@ -323,79 +372,81 @@ export function DeployDialog({
               </section>
             </fieldset>
 
-            {submitError && (
-              <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive wrap-break-words">
-                {submitError}
-              </div>
-            )}
-            {(busy || Object.keys(liveSteps).length > 0) && (
-              <div className="space-y-1.5 rounded-lg border border-border/50 p-3 mt-2">
-                {busy && Object.keys(liveSteps).length === 0 && (
-                  <div className="flex items-center gap-2 text-xs min-w-0">
-                    <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
-                    <span className="text-muted-foreground">
-                      Preparing deploy - loading strategy modules…
-                    </span>
-                  </div>
-                )}
-                {Object.entries(liveSteps).map(([idx, s]) => (
-                  <div
-                    key={idx}
-                    className="flex items-center gap-2 text-xs min-w-0"
-                  >
-                    <span
-                      className={cn(
-                        "size-1.5 shrink-0 rounded-full",
-                        s.stage === "failed"
-                          ? "bg-destructive"
-                          : s.stage === "deployed"
-                            ? "bg-green-500"
-                            : "bg-amber-500 animate-pulse",
-                      )}
-                    />
-                    <span className="font-medium shrink-0">
-                      Pair {Number(idx) + 1}
-                    </span>
-                    <span
-                      className="text-muted-foreground truncate min-w-0 flex-1"
-                      title={s.detail ? `${s.stage} - ${s.detail}` : s.stage}
+            <div className="space-y-2 mt-2">
+              {submitError && (
+                <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive wrap-break-words">
+                  {submitError}
+                </div>
+              )}
+              {(busy || Object.keys(liveSteps).length > 0) && (
+                <div className="space-y-1.5 rounded-lg border border-border/50 p-3">
+                  {busy && Object.keys(liveSteps).length === 0 && (
+                    <div className="flex items-center gap-2 text-xs min-w-0">
+                      <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        Preparing deploy - loading strategy modules…
+                      </span>
+                    </div>
+                  )}
+                  {Object.entries(liveSteps).map(([idx, s]) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 text-xs min-w-0"
                     >
-                      {s.stage}
-                      {s.detail ? ` - ${s.detail}` : ""}
-                    </span>
-                    {s.txHash && (
-                      <a
-                        href={`https://basescan.org/tx/${s.txHash}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="ml-auto font-mono text-[11px] text-muted-foreground hover:text-foreground shrink-0"
+                      <span
+                        className={cn(
+                          "size-1.5 shrink-0 rounded-full",
+                          s.stage === "failed"
+                            ? "bg-destructive"
+                            : s.stage === "deployed"
+                              ? "bg-green-500"
+                              : "bg-amber-500 animate-pulse",
+                        )}
+                      />
+                      <span className="font-medium shrink-0">
+                        Pair {Number(idx) + 1}
+                      </span>
+                      <span
+                        className="text-muted-foreground truncate min-w-0 flex-1"
+                        title={s.detail ? `${s.stage} - ${s.detail}` : s.stage}
                       >
-                        {s.txHash.slice(0, 8)}…
-                      </a>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            {txHashes.length > 0 && (
-              <div className="space-y-1">
-                {txHashes.map((h) => (
-                  <a
-                    key={h}
-                    href={`https://basescan.org/tx/${h}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block text-center font-mono text-[11px] text-muted-foreground hover:text-foreground"
-                  >
-                    {h.slice(0, 10)}…{h.slice(-6)}
-                  </a>
-                ))}
-              </div>
-            )}
+                        {s.stage}
+                        {s.detail ? ` - ${s.detail}` : ""}
+                      </span>
+                      {s.txHash && (
+                        <Link
+                          href={`https://basescan.org/tx/${s.txHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="ml-auto font-mono text-[11px] text-muted-foreground hover:text-foreground shrink-0"
+                        >
+                          {s.txHash.slice(0, 8)}…
+                        </Link>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {txHashes.length > 0 && (
+                <div className="space-y-1">
+                  {txHashes.map((h) => (
+                    <Link
+                      key={h}
+                      href={`https://basescan.org/tx/${h}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block text-center font-mono text-[11px] text-muted-foreground hover:text-foreground"
+                    >
+                      {h.slice(0, 10)}…{h.slice(-6)}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <Button
               type="submit"
-              className="w-full rounded-full mt-2"
+              className="w-full rounded-full"
               size="lg"
               disabled={busy}
             >
