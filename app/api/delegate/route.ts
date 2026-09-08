@@ -213,7 +213,7 @@ export async function POST(req: Request) {
       gas: 1_000_000n,
       chain: base,
     });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
 
     await prisma.managedUser.upsert({
       where: { address: userAddress.toLowerCase() },

@@ -205,7 +205,7 @@ export function useDelegation() {
         authorizationList: [authorization],
         chain: base,
       } as any);
-      await publicClient.waitForTransactionReceipt({ hash });
+      await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
       const code = await publicClient.getCode({ address });
       if (parse7702Target(code)?.toLowerCase() !== CALIBUR_ADDRESS.toLowerCase()) {
         setError("7702 delegation failed - code not set. Try again.");
@@ -314,7 +314,7 @@ export function useDelegation() {
       const result = await res.json();
       if (!result.ok) throw new Error(result.error || "Relay failed");
 
-      await publicClient.waitForTransactionReceipt({ hash: result.txHash as Hex });
+      await publicClient.waitForTransactionReceipt({ hash: result.txHash as Hex, timeout: 120_000 });
       return result.txHash as Hex;
     },
     [address, publicClient]
