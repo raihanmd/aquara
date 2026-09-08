@@ -23,6 +23,7 @@ import {
   eip712DomainAbi,
   hookAbi,
   ANY_FN_SEL,
+  ANY_TARGET,
   CALIBUR_ADDRESS,
   GUARDED_EXECUTOR_HOOK,
   ONEINCH_V6_ROUTER,
@@ -97,6 +98,8 @@ export function buildDelegationCalldata(params: DelegationParams): Hex {
     { target: AQUA, selector: SELECTORS.aquaDock },
     // 1inch router, any entry point (agent swaps need this)
     { target: ONEINCH_V6_ROUTER, selector: ANY_FN_SEL },
+    // approve() on any token (agent must approve whatever strategies need)
+    { target: ANY_TARGET, selector: SELECTORS.erc20Approve },
     // Token approvals
     ...KNOWN_TOKENS.concat(extraTokens).map((token) => ({
       target: token,
@@ -174,6 +177,8 @@ export function buildDelegationCalls(params: DelegationParams): Call[] {
     { target: AQUA, selector: SELECTORS.aquaDock },
     // 1inch router, any entry point (agent swaps need this)
     { target: ONEINCH_V6_ROUTER, selector: ANY_FN_SEL },
+    // approve() on any token (agent must approve whatever strategies need)
+    { target: ANY_TARGET, selector: SELECTORS.erc20Approve },
     ...KNOWN_TOKENS.concat(extraTokens).map((token) => ({
       target: token,
       selector: SELECTORS.erc20Approve,
