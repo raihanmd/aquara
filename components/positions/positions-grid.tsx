@@ -1,10 +1,13 @@
 "use client";
 
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { usePublicClient } from "wagmi";
+import { base } from "wagmi/chains";
+import type { Address } from "viem";
 import { useDelegation } from "@/hooks/use-delegation";
 import { useMyAquaPositions } from "@/hooks/use-my-aqua-positions";
-import { QUIRKY_MESSAGES } from "@/lib/config";
+import { QUIRKY_MESSAGES, AQUA } from "@/lib/config";
 import { TopPositions } from "@/components/aqua/top-positions";
 import { SharedCapital } from "@/components/aqua/shared-capital";
 import { AgentActivity } from "@/components/aqua/agent-activity";
@@ -12,6 +15,7 @@ import { AquaPositionCard } from "./aqua-position-card";
 import { DelegationStepper } from "@/components/delegation/delegation-stepper";
 import { DeployDialog } from "@/components/aqua/deploy-dialog";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const PAGE_SIZE = 9;
 const GRID_SLOTS = 9;
@@ -48,7 +52,8 @@ function netSizeUsd(
  */
 
 export function PositionsGrid() {
-  const { positions, isLoading, error, effectiveMaker } = useMyAquaPositions();
+  const { positions, isLoading, error, effectiveMaker, refresh } =
+    useMyAquaPositions();
   const {
     status: delegationStatus,
     revoke,
@@ -60,26 +65,126 @@ export function PositionsGrid() {
   const [delegateOpen, setDelegateOpen] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
   const [modeMap, setModeMap] = useState<Record<string, string>>({});
+  const [allowMap, setAllowMap] = useState<Record<string, string>>({});
+  const [rangeMap, setRangeMap] = useState<
+    Record<string, { min: string; max: string }>
+  >({});
+  const [modesLoaded, setModesLoaded] = useState(false);
+  const markedRef = useRef<Set<string>>(new Set());
   const isDelegated = delegationStatus === "delegated";
+
+  const publicClient = usePublicClient({ chainId: base.id });
 
   useEffect(() => {
     if (!delegateOpen) checkDelegation();
   }, [delegateOpen, checkDelegation]);
 
-  useEffect(() => {
-    if (!effectiveMaker) return;
-    fetch(`/api/strategies?maker=${effectiveMaker}`)
+  const fetchModes = useCallback(() => {
+    if (!effectiveMaker) return Promise.resolve();
+    return fetch(`/api/strategies?maker=${effectiveMaker}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((rows) => {
         const m: Record<string, string> = {};
+        const r: Record<string, { min: string; max: string }> = {};
         for (const row of rows ?? []) {
-          if (row?.strategyHash)
-            m[String(row.strategyHash).toLowerCase()] = row.mode;
+          if (!row?.strategyHash) continue;
+          const key = String(row.strategyHash).toLowerCase();
+          m[key] = row.mode;
+          if (row.priceMin && row.priceMax)
+            r[key] = { min: row.priceMin, max: row.priceMax };
         }
         setModeMap(m);
+        setRangeMap(r);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setModesLoaded(true));
   }, [effectiveMaker]);
+
+  useEffect(() => {
+    fetchModes();
+  }, [fetchModes]);
+
+  useEffect(() => {
+    if (!effectiveMaker || !publicClient || positions.length === 0) return;
+    const toks = [
+      ...new Set(
+        positions.flatMap((p) =>
+          ((p as any)?.tokens ?? []).map((t: any) => String(t?.address ?? "").toLowerCase()),
+        ).filter(Boolean),
+      ),
+    ];
+    if (toks.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = (await publicClient.multicall({
+          contracts: toks.map((t) => ({
+            address: t as Address,
+            abi: [
+              {
+                name: "allowance",
+                type: "function",
+                stateMutability: "view",
+                inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
+                outputs: [{ type: "uint256" }],
+              },
+            ] as const,
+            functionName: "allowance",
+            args: [effectiveMaker as Address, AQUA as Address],
+          })),
+        })) as any[];
+        if (cancelled) return;
+        const m: Record<string, string> = {};
+        res.forEach((r, k) => {
+          if (r?.status === "success") m[toks[k]] = (r.result as bigint).toString();
+        });
+        setAllowMap(m);
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveMaker, publicClient, positions]);
+
+  useEffect(() => {
+    if (
+      !isDelegated ||
+      !modesLoaded ||
+      !effectiveMaker ||
+      positions.length === 0
+    )
+      return;
+    const missing = positions
+      .map((p) => (p.strategyHash ?? "").toLowerCase())
+      .filter(
+        (h) => h && modeMap[h] === undefined && !markedRef.current.has(h),
+      );
+    if (missing.length === 0) return;
+    for (const h of missing) markedRef.current.add(h);
+    (async () => {
+      const marked: Record<string, string> = {};
+      for (const h of missing) {
+        try {
+          const r = await fetch("/api/strategies", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              strategyHash: h,
+              maker: effectiveMaker,
+              mode: "conservative",
+            }),
+          });
+          if (r.ok) marked[h] = "conservative";
+          else markedRef.current.delete(h);
+        } catch {
+          markedRef.current.delete(h);
+        }
+      }
+      if (Object.keys(marked).length > 0) {
+        setModeMap((prev) => ({ ...prev, ...marked }));
+      }
+    })();
+  }, [isDelegated, modesLoaded, effectiveMaker, positions, modeMap]);
 
   useEffect(() => {
     if (!isDelegated || !effectiveMaker) return;
@@ -178,10 +283,12 @@ export function PositionsGrid() {
                 >
                   Deploy strategy
                 </Button>
-                <button
+                <Button
                   onClick={() => revoke()}
                   disabled={isRevoking}
-                  className="group flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 cursor-pointer"
+                  variant="ghost"
+                  size="sm"
+                  className="group rounded-full bg-primary/10 px-3 text-xs font-medium text-primary hover:bg-destructive/10 hover:text-destructive"
                 >
                   <span className="size-1.5 rounded-full bg-current group-hover:bg-current" />
                   <span className="group-hover:hidden">
@@ -190,7 +297,7 @@ export function PositionsGrid() {
                   <span className="hidden group-hover:inline">
                     {isRevoking ? "Revoking…" : "Deactivate"}
                   </span>
-                </button>
+                </Button>
               </div>
             )}
           </div>
@@ -199,8 +306,8 @@ export function PositionsGrid() {
 
       <TopPositions limit={6} />
 
-      <div className="mt-8">
-        <div className="flex items-center justify-between mb-4">
+      <div className="mt-8 space-y-4">
+        <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold tracking-tight flex items-center gap-2">
             Your Aqua Positions
             {effectiveMaker && (
@@ -238,13 +345,26 @@ export function PositionsGrid() {
 
         {isLoading && positions.length === 0 && (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {[...Array(GRID_SLOTS)].map((_, i) => (
+            {[...Array(3)].map((_, i) => (
               <div
                 key={i}
-                className="h-44 rounded-xl border border-border/50 bg-card"
+                className="flex flex-col gap-0 px-4 pt-3 pb-3 rounded-xl border border-border/50 bg-card w-full"
               >
-                <div className="flex h-full items-center justify-center">
-                  <div className="size-4 rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60 animate-spin" />
+                <div className="flex items-center justify-between mb-2">
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-5 w-16 rounded-md" />
+                </div>
+                {[0, 1].map((r) => (
+                  <div key={r} className="flex items-center gap-2 py-1.5">
+                    <Skeleton className="size-[18px] rounded-full" />
+                    <Skeleton className="h-3.5 w-16" />
+                    <Skeleton className="h-3.5 w-12 ml-auto" />
+                  </div>
+                ))}
+                <div className="flex items-center gap-4 mt-2">
+                  <Skeleton className="h-3.5 w-14" />
+                  <Skeleton className="h-3.5 w-14" />
+                  <Skeleton className="h-3.5 w-14" />
                 </div>
               </div>
             ))}
@@ -269,24 +389,77 @@ export function PositionsGrid() {
         )}
 
         {!isLoading && !error && positions.length > 0 && (
-          <div className="mb-6">
-            <SharedCapital positions={positions} />
-          </div>
+          <SharedCapital positions={positions} />
         )}
 
         {!isLoading && !error && positions.length > 0 && (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
             {slots.map((slot, idx) => {
               if (slot.type === "position") {
+                const hashKey = (
+                  slot.position.strategyHash ?? ""
+                ).toLowerCase();
+                const toks = (slot.position as any)?.tokens ?? [];
+                const rawOf = (t: any) => {
+                  try {
+                    return BigInt(
+                      String(
+                        t?.currentBalance?.raw ?? t?.walletBalance?.raw ?? "0",
+                      ),
+                    );
+                  } catch {
+                    return 0n;
+                  }
+                };
+                const fillable =
+                  toks.length >= 2 &&
+                  rawOf(toks[0]) > 0n &&
+                  rawOf(toks[1]) > 0n;
+                const allowOk = (t: any) => {
+                  const v = allowMap[String(t?.address ?? "").toLowerCase()];
+                  if (v === undefined) return null;
+                  try {
+                    return BigInt(v) > 0n;
+                  } catch {
+                    return null;
+                  }
+                };
+                const a0 = allowOk(toks[0]);
+                const a1 = allowOk(toks[1]);
+                const allowanceOk = a0 === null || a1 === null ? null : Boolean(a0 && a1);
+                const rg = rangeMap[hashKey];
+                let rangeLabel: string | null = null;
+                if (rg && toks.length >= 2) {
+                  const dOf = (t: any) => t?.decimals ?? t?.meta?.decimals;
+                  const d0 = dOf(toks[0]);
+                  const d1 = dOf(toks[1]);
+                  if (d0 !== undefined && d1 !== undefined) {
+                    const hiIs0 =
+                      String(toks[0]?.address ?? "").toLowerCase() >
+                      String(toks[1]?.address ?? "").toLowerCase();
+                    const decHi = hiIs0 ? d0 : d1;
+                    const decLo = hiIs0 ? d1 : d0;
+                    const symHi = hiIs0 ? toks[0]?.symbol : toks[1]?.symbol;
+                    const f = (v: string) => {
+                      const n = (Number(v) * 10 ** (decLo - decHi)) / 1e18;
+                      if (!isFinite(n) || n <= 0) return "?";
+                      return n.toLocaleString("en-US", {
+                        notation: "compact",
+                        maximumFractionDigits: 2,
+                      });
+                    };
+                    rangeLabel = `${f(rg.min)}–${f(rg.max)}${symHi ? ` ${symHi}` : ""}`;
+                  }
+                }
                 return (
                   <AquaPositionCard
                     key={slot.position.strategyHash + idx}
                     position={slot.position}
-                    mode={
-                      modeMap[
-                        (slot.position.strategyHash ?? "").toLowerCase()
-                      ] ?? null
-                    }
+                    mode={modeMap[hashKey] ?? null}
+                    fillable={fillable}
+                    allowanceOk={allowanceOk}
+                    rangeLabel={rangeLabel}
+                    onClosed={() => refresh()}
                   />
                 );
               }
@@ -295,9 +468,7 @@ export function PositionsGrid() {
         )}
 
         {!isLoading && !error && effectiveMaker && (
-          <div>
-            <AgentActivity maker={effectiveMaker} />
-          </div>
+          <AgentActivity maker={effectiveMaker} />
         )}
       </div>
 
@@ -306,7 +477,14 @@ export function PositionsGrid() {
         onOpenChange={setDelegateOpen}
         mode={positions.map((p) => p.strategyHash)}
       />
-      <DeployDialog open={deployOpen} onOpenChange={setDeployOpen} />
+      <DeployDialog
+        open={deployOpen}
+        onOpenChange={setDeployOpen}
+        onDone={() => {
+          refresh();
+          fetchModes();
+        }}
+      />
     </div>
   );
 }

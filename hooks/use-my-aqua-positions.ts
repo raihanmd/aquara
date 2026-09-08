@@ -32,8 +32,9 @@ export interface EnrichedAquaPosition {
   app: string;
   maker: string;
   tokens: AquaToken[];
-  status: "inRange" | "outOfRange";
+  status: "inRange" | "outOfRange" | "illiquid";
   isOutOfRange: boolean;
+  isIlliquid: boolean;
   classification: Record<string, unknown> | string | null;
   priceRange: {
     lower?: string | number | null;
@@ -61,38 +62,42 @@ export interface EnrichedAquaPosition {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/**
- * Determine if position is Out Of Range (OOR).
- * OOR if classification.state === 'illiquidity' OR any token currentBalance is 0.
- */
-export function isAquaOutOfRange(
+export function isAquaIlliquid(
   classification: EnrichedAquaPosition["classification"],
-  tokens: AquaToken[],
 ): boolean {
-  // Check classification.state === 'illiquidity'
   if (classification && typeof classification === "object") {
     const state = (classification as Record<string, unknown>).state;
     if (state === "illiquidity") return true;
-    // Also handle nested classification like { status: 'illiquidity' }
     const status = (classification as Record<string, unknown>).status;
     if (status === "illiquidity") return true;
   }
-  if (typeof classification === "string" && classification === "illiquidity") {
-    return true;
-  }
+  return classification === "illiquidity";
+}
 
+/**
+ * Determine if position is Out Of Range (OOR).
+ * OOR here means empty (no side has any balance). Illiquidity is tracked
+ * separately via isAquaIlliquid - an illiquid position may still be in range.
+ * Single-sided positions (one side funded) are valid and count as in-range.
+ */
+export function isAquaOutOfRange(
+  _classification: EnrichedAquaPosition["classification"],
+  tokens: AquaToken[],
+): boolean {
+  let anyKnown = false;
   for (const t of tokens) {
     const bal: any = t.currentBalance;
     const raw = typeof bal === "object" && bal !== null ? bal.raw : bal;
-    if (raw !== undefined && raw !== null) {
-      const balStr = String(raw).trim();
-      if (balStr === "0" || balStr === "0x0" || balStr === "") return true;
-      const num = Number(balStr);
-      if (!isNaN(num) && num === 0) return true;
-    }
+    if (raw === undefined || raw === null) continue;
+    const balStr = String(raw).trim();
+    if (balStr === "" || balStr === "0x") continue;
+    anyKnown = true;
+    const num = Number(balStr);
+    if (!isNaN(num) && num > 0) return false;
+    if (isNaN(num) && balStr !== "0" && balStr !== "0x0") return false;
   }
 
-  return false;
+  return anyKnown;
 }
 
 function normalizeToken(raw: Record<string, unknown>): AquaToken {
@@ -128,6 +133,7 @@ function normalizeAquaPosition(
   const classification =
     (raw.classification as EnrichedAquaPosition["classification"]) ?? null;
   const oor = isAquaOutOfRange(classification, tokens);
+  const illiquid = isAquaIlliquid(classification);
 
   return {
     strategyHash: (raw.strategyHash as string) ?? "",
@@ -137,8 +143,9 @@ function normalizeAquaPosition(
     app: (raw.app as string) ?? "",
     maker: (raw.maker as string) ?? "",
     tokens,
-    status: oor ? "outOfRange" : "inRange",
+    status: illiquid ? "illiquid" : oor ? "outOfRange" : "inRange",
     isOutOfRange: oor,
+    isIlliquid: illiquid,
     classification,
     priceRange: (raw.priceRange as EnrichedAquaPosition["priceRange"]) ?? null,
     performance:
@@ -192,7 +199,7 @@ export function useMyAquaPositions() {
   const query = useQuery({
     queryKey: ["aqua", "my-positions", address] as const,
     queryFn: () => fetchAquaPositionsForMaker(address as string),
-    staleTime: 60_000,
+    staleTime: 0,
     retry: 1,
     enabled: !!address,
   });

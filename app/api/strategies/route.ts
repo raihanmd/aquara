@@ -8,7 +8,10 @@ const postSchema = z.object({
   maker: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   chainId: z.coerce.number().int().positive().default(8453).optional(),
   mode: z.enum(["conservative", "aggressive"]).default("conservative"),
-  capitalToken: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  capitalToken: z
+    .string()
+    .regex(/^0x[a-fA-F0-9]{40}$/)
+    .default("0x0000000000000000000000000000000000000000"),
 });
 
 export async function POST(req: Request) {
