@@ -50,8 +50,11 @@ model ManagedStrategy {
   chainId      Int      @default(8453)
   mode         String   @db.VarChar(16)
   capitalToken String   @db.VarChar(42)
+  tokenA       String?  @db.VarChar(42)
+  tokenB       String?  @db.VarChar(42)
   priceMin     String?  @db.VarChar(78)
   priceMax     String?  @db.VarChar(78)
+  strategyBytes String? @db.Text
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
