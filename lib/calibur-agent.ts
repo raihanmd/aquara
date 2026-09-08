@@ -178,7 +178,7 @@ export async function agentSignAndSubmit(
     gas: 1_200_000n,
     chain: base,
   });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
   if (receipt.status !== "success") throw new Error("Batch reverted on-chain");
   return { txHash, nonce: seq };
 }
