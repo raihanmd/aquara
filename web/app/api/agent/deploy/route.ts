@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
 import { AQUA_BASE, aquaHeaders } from "@/lib/aqua-api";
 import { verifyDeployIntent } from "@/lib/deploy-auth";
+import { requireCre } from "@/lib/cre-auth";
 import { agentSignAndSubmit, type CaliburCall } from "@/lib/calibur-agent";
 
 export const dynamic = "force-dynamic";
@@ -217,30 +218,39 @@ async function quoteOut(
   }
 }
 
-export async function POST(req: Request) {
-  const parsed = bodySchema.safeParse(await req.json().catch(() => ({})));
-  if (!parsed.success) {
-    return Response.json(
-      { error: "maker, capital, capitalAmount, pairs[] required" },
-      { status: 400 },
-    );
-  }
-  const { maker, capital, capitalAmount, pairs, mode } = parsed.data;
-
-  const auth = await verifyDeployIntent(parsed.data as unknown as Record<string, unknown>, parsed.data.signature);
-  if (!auth.ok) {
-    return Response.json({ error: auth.error }, { status: 401 });
-  }
-
-  const settingsRow = await (prisma as any).makerSettings.findUnique({
+async function runDeployPipeline(
+  parsed: z.infer<typeof bodySchema>,
+) {
+  const { maker, capital, capitalAmount, pairs, mode } = parsed;
+  const settingsRow = await (prisma as unknown as { makerSettings: { findUnique: (args: unknown) => Promise<{ slippage?: number } | null> } }).makerSettings.findUnique({
     where: { maker: maker.toLowerCase() },
   });
-  const slippage: number = parsed.data.slippage ?? settingsRow?.slippage ?? 0.5;
+  const slippage: number = parsed.slippage ?? settingsRow?.slippage ?? 0.5;
 
   const apiKey =
     process.env.ONEINCH_API_KEY || process.env.NEXT_PUBLIC_1INCH_API_KEY;
   if (!apiKey)
     return Response.json({ error: "ONEINCH_API_KEY missing" }, { status: 500 });
+
+  // One deploy pipeline per maker at a time. Concurrent runs share the single
+  // relayer EOA and collide on its transaction nonce even with per-relayer
+  // serialization, because interleaved Calibur seq reads go stale. Jobs older
+  // than 20 minutes count as orphaned (server restart) and do not block.
+  const running = await prisma.agentJob.findFirst({
+    where: {
+      maker: maker.toLowerCase(),
+      kind: "deploy",
+      status: "running",
+      createdAt: { gte: new Date(Date.now() - 20 * 60 * 1000) },
+    },
+    select: { id: true },
+  });
+  if (running) {
+    return Response.json(
+      { error: "deploy already running for this maker", jobId: running.id },
+      { status: 409 },
+    );
+  }
 
   const job = await prisma.agentJob.create({
     data: {
@@ -257,14 +267,14 @@ export async function POST(req: Request) {
       const send = (obj: unknown) => {
         controller.enqueue(`data: ${JSON.stringify(obj)}\n\n`);
       };
-      const steps: any[] = [];
-      const pushStep = async (step: any) => {
+      const steps: unknown[] = [];
+      const pushStep = async (step: unknown) => {
         steps.push(step);
         await prisma.agentJob.update({
           where: { id: job.id },
-          data: { steps },
+          data: { steps: steps as unknown as never },
         });
-        send({ ...step, jobId: job.id });
+        send({ ...(step as Record<string, unknown>), jobId: job.id });
       };
 
       try {
@@ -287,12 +297,10 @@ export async function POST(req: Request) {
 
         const aquaSdk = await import("@1inch/aqua-sdk");
         const vmSdk = await import("@1inch/swap-vm-sdk");
-        const toAddr = (x: string) => new (aquaSdk.Address as any)(x);
-        const toHex = (x: any) =>
-          new (aquaSdk.HexString as any)(x?.toString?.() ?? x);
-        const aqua = new (aquaSdk.AquaProtocolContract as any)(
-          new (aquaSdk.Address as any)(AQUA),
-        );
+        const toAddr = (x: string) => new (aquaSdk.Address as unknown as new (x: string) => unknown)(x);
+        const toHex = (x: unknown) =>
+          new (aquaSdk.HexString as unknown as new (x: string) => unknown)(String((x as { toString?: () => string })?.toString?.() ?? x));
+        const aqua = new (aquaSdk.AquaProtocolContract as unknown as new (x: unknown) => { ship: (args: unknown) => { to: Address; data: Hex; value: bigint } })(new (aquaSdk.Address as unknown as new (x: string) => unknown)(AQUA));
 
         if (total === 0n) throw new Error("Capital too small to split.");
 
@@ -351,7 +359,7 @@ export async function POST(req: Request) {
                 args: [maker as Address],
               })),
             ],
-          } as any),
+          } as unknown as never),
           (async () => {
             const m = new Map<string, bigint>();
             try {
@@ -360,7 +368,7 @@ export async function POST(req: Request) {
                 { headers: aquaHeaders(apiKey) },
               );
               if (aq.ok) {
-                const aj = await aq.json();
+                const aj = await aq.json() as { items?: Array<{ tokens?: Array<{ address?: string; currentBalance?: { raw?: string } }> }> };
                 for (const s of aj.items ?? []) {
                   for (const t of s.tokens ?? []) {
                     const a = String(t?.address ?? "").toLowerCase();
@@ -380,8 +388,8 @@ export async function POST(req: Request) {
         const decMap = new Map<string, number>();
         const walletMap = new Map<string, bigint>();
         allToks.forEach((t, k) => {
-          const d = (inv as any)[k] as any;
-          const b = (inv as any)[k + allToks.length] as any;
+          const d = (inv as unknown as Array<{ status: string; result?: unknown }>)[k];
+          const b = (inv as unknown as Array<{ status: string; result?: unknown }>)[k + allToks.length];
           if (!d || d.status !== "success")
             throw new Error(`cannot read token ${t.slice(0, 6)} on-chain`);
           decMap.set(t, Number(d.result));
@@ -461,10 +469,14 @@ export async function POST(req: Request) {
           return BigInt(Math.floor((usd / p) * 10 ** d));
         };
 
-        const withSalt = (s: any, salt: bigint) =>
-          typeof s.withSalt === "function" ? s.withSalt(salt) : s;
-        const withFee = (s: any, bps: number) =>
-          typeof s.withFeeTokenIn === "function" ? s.withFeeTokenIn(bps) : s;
+        const withSalt = (s: unknown, salt: bigint) => {
+          const maybe = s as { withSalt?: (salt: bigint) => unknown };
+          return typeof maybe.withSalt === "function" ? maybe.withSalt(salt) : s;
+        };
+        const withFee = (s: unknown, bps: number) => {
+          const maybe = s as { withFeeTokenIn?: (bps: number) => unknown };
+          return typeof maybe.withFeeTokenIn === "function" ? maybe.withFeeTokenIn(bps) : s;
+        };
         const runSalt = BigInt(Date.now());
         const plans: PairPlan[] = [];
 
@@ -562,40 +574,40 @@ export async function POST(req: Request) {
             }
           }
           const salt = runSalt * 1000n + BigInt(i);
-          let program = withFee(
-            withSalt((vmSdk.AquaXYCAmmStrategy as any).new(), salt),
+          let program = (withFee(
+            withSalt((vmSdk.AquaXYCAmmStrategy as unknown as { new: () => unknown }).new(), salt),
             5,
-          ).build();
+          ) as { build: () => unknown }).build();
           if (range) {
             try {
-              program = withFee(
+              program = (withFee(
                 withSalt(
-                  (vmSdk.AquaXYCAmmStrategy as any).newConcentrate({
+                  (vmSdk.AquaXYCAmmStrategy as unknown as { newConcentrate: (args: unknown) => unknown }).newConcentrate({
                     rawPriceMin: BigInt(range.min),
                     rawPriceMax: BigInt(range.max),
                   }),
                   salt,
                 ),
                 10,
-              ).build();
+              ) as { build: () => unknown }).build();
             } catch {
-              program = withFee(
-                withSalt((vmSdk.AquaXYCAmmStrategy as any).new(), salt),
+              program = (withFee(
+                withSalt((vmSdk.AquaXYCAmmStrategy as unknown as { new: () => unknown }).new(), salt),
                 5,
-              ).build();
+              ) as { build: () => unknown }).build();
               range = null;
             }
           }
-          const order = (vmSdk.Order as any).new({
-            maker: new (vmSdk.Address as any)(maker),
-            traits: (vmSdk.MakerTraits as any).default(),
+          const order = (vmSdk.Order as unknown as { new: (args: unknown) => { encode: () => { toString: () => string } } }).new({
+            maker: new (vmSdk.Address as unknown as new (x: string) => unknown)(maker),
+            traits: (vmSdk.MakerTraits as unknown as { default: () => unknown }).default(),
             program,
           });
           const strategy = order.encode().toString();
           const strategyHash: string =
-            typeof aquaSdk.AquaProtocolContract.calculateStrategyHash ===
+            typeof (aquaSdk.AquaProtocolContract as unknown as { calculateStrategyHash?: (s: string) => { toString: () => string } }).calculateStrategyHash ===
             "function"
-              ? aquaSdk.AquaProtocolContract.calculateStrategyHash(
+              ? (aquaSdk.AquaProtocolContract as unknown as { calculateStrategyHash: (s: string) => { toString: () => string } }).calculateStrategyHash(
                   strategy,
                 ).toString()
               : "";
@@ -631,13 +643,14 @@ export async function POST(req: Request) {
                 value: s.value,
                 account: maker as Address,
               });
-            } catch (e: any) {
+            } catch (e: unknown) {
+              const err = e as { shortMessage?: string; message?: string };
               throw new Error(
-                `pair ${plan.idx + 1} simulation failed - refusing to spend gas (${e?.shortMessage || e?.message || "swap would revert"})`,
+                `pair ${plan.idx + 1} simulation failed - refusing to spend gas (${err?.shortMessage || err?.message || "swap would revert"})`,
               );
             }
           }
-          const shipTx = aqua.ship({
+          const shipTx = (aqua as unknown as { ship: (args: unknown) => { to: Address; data: Hex; value: bigint } }).ship({
             app: toAddr(AQUA_ROUTER),
             strategy: toHex(plan.strategy?.toString?.() ?? plan.strategy),
             amountsAndTokens: [
@@ -652,12 +665,13 @@ export async function POST(req: Request) {
               value: BigInt(shipTx.value ?? 0),
               account: maker as Address,
             });
-          } catch (e: any) {
+          } catch (e: unknown) {
+            const err = e as { shortMessage?: string; message?: string };
             throw new Error(
-              `pair ${plan.idx + 1} ship simulation failed (${e?.shortMessage || e?.message || "ship would revert"})`,
+              `pair ${plan.idx + 1} ship simulation failed (${err?.shortMessage || err?.message || "ship would revert"})`,
             );
           }
-          (plan as any).shipCall = {
+          (plan as unknown as { shipCall: CaliburCall }).shipCall = {
             to: shipTx.to as Address,
             value: BigInt(shipTx.value ?? 0),
             data: shipTx.data as Hex,
@@ -739,12 +753,13 @@ export async function POST(req: Request) {
                 };
                 try {
                   swapHash = await submitOne(leg.data);
-                } catch (e: any) {
+                } catch (e: unknown) {
+                  const err = e as { message?: string; shortMessage?: string; details?: unknown; cause?: { message?: string } };
                   devLog(`pair ${i} swap ${si} submit failed`, {
-                    message: e?.message,
-                    shortMessage: e?.shortMessage,
-                    details: e?.details,
-                    cause: String(e?.cause?.message ?? e?.cause ?? "").slice(
+                    message: err?.message,
+                    shortMessage: err?.shortMessage,
+                    details: err?.details,
+                    cause: String(err?.cause?.message ?? err?.cause ?? "").slice(
                       0,
                       500,
                     ),
@@ -764,9 +779,9 @@ export async function POST(req: Request) {
                       apiKey,
                     );
                     swapHash = await submitOne(fresh.data);
-                  } catch (e2: any) {
+                  } catch (e2: unknown) {
                     devLog(`pair ${i} swap ${si} retry failed`, {
-                      message: (e2 as any)?.message ?? e2,
+                      message: (e2 as { message?: string })?.message ?? String(e2),
                     });
                     throw e2;
                   }
@@ -847,7 +862,7 @@ export async function POST(req: Request) {
                 detail: "concentrated +-10% around spot",
               });
             }
-            const shipCall = (plan as any).shipCall as CaliburCall;
+            const shipCall = (plan as unknown as { shipCall: CaliburCall }).shipCall;
             await pushStep({
               pair: i,
               stage: "shipping",
@@ -863,12 +878,13 @@ export async function POST(req: Request) {
               ({ txHash } = await agentSignAndSubmit(maker as Address, [
                 shipCall,
               ]));
-            } catch (e: any) {
+            } catch (e: unknown) {
+              const err = e as { message?: string; shortMessage?: string; details?: unknown; cause?: { message?: string } };
               devLog(`pair ${i} ship submit failed`, {
-                message: e?.message,
-                shortMessage: e?.shortMessage,
-                details: e?.details,
-                cause: String(e?.cause?.message ?? e?.cause ?? "").slice(
+                message: err?.message,
+                shortMessage: err?.shortMessage,
+                details: err?.details,
+                cause: String(err?.cause?.message ?? err?.cause ?? "").slice(
                   0,
                   500,
                 ),
@@ -920,11 +936,12 @@ export async function POST(req: Request) {
               }
             } catch {}
             okCount++;
-          } catch (e: any) {
+          } catch (e: unknown) {
+            const err = e as { shortMessage?: string; message?: string };
             await pushStep({
               pair: i,
               stage: "failed",
-              detail: e?.shortMessage || e?.message || "pair failed",
+              detail: err?.shortMessage || err?.message || "pair failed",
             });
           }
         }
@@ -932,7 +949,7 @@ export async function POST(req: Request) {
         const leftoverCap = await balOfExec(capital).catch(() => 0n);
         await prisma.agentJob.update({
           where: { id: job.id },
-          data: { status: okCount > 0 ? "done" : "failed", steps },
+          data: { status: okCount > 0 ? "done" : "failed", steps: steps as unknown as never },
         });
         send({
           done: true,
@@ -942,8 +959,9 @@ export async function POST(req: Request) {
           leftover: formatUnits(leftoverCap, capDecimals),
         });
         controller.close();
-      } catch (e: any) {
-        const msg = e?.shortMessage || e?.message || "deploy failed";
+      } catch (e: unknown) {
+        const err = e as { shortMessage?: string; message?: string };
+        const msg = err?.shortMessage || err?.message || "deploy failed";
         await prisma.agentJob.update({
           where: { id: job.id },
           data: { status: "failed", error: String(msg).slice(0, 2000) },
@@ -961,6 +979,131 @@ export async function POST(req: Request) {
       Connection: "keep-alive",
     },
   });
+}
+
+export async function POST(req: Request) {
+  const rawBody = await req.json().catch(() => ({}));
+
+  // CRE auth branch: check x-api-key FIRST via requireCre
+  // secrets.yaml maps secret ID (CRE_API_KEY, used via getSecret({id})) to ENV VAR NAME (CRE_API_KEY_VAR,
+  // resolved from .env locally / Vault DON when deployed). See cre/aquara-watch/secrets.yaml
+  const creCheck = requireCre(req);
+  if (creCheck === null) {
+    // Valid CRE x-api-key -> CRE flow (global key, accepted risk: not per-maker)
+    const makerRaw = (rawBody as Record<string, unknown>).maker;
+    const modeRaw = (rawBody as Record<string, unknown>).mode;
+    const strategyHashRaw = (rawBody as Record<string, unknown>).strategyHash;
+    const pairRaw = (rawBody as Record<string, unknown>).pair;
+
+    if (
+      typeof makerRaw !== "string" ||
+      !/^0x[a-fA-F0-9]{40}$/.test(makerRaw)
+    ) {
+      return Response.json({ error: "maker required" }, { status: 403 });
+    }
+    if (modeRaw !== "aggressive") {
+      return Response.json({ error: "mode must be aggressive" }, { status: 403 });
+    }
+    if (
+      typeof strategyHashRaw !== "string" ||
+      !/^0x[a-fA-F0-9]{64}$/.test(strategyHashRaw)
+    ) {
+      return Response.json({ error: "strategyHash required" }, { status: 403 });
+    }
+    if (typeof pairRaw !== "string" || pairRaw.length === 0) {
+      return Response.json({ error: "pair required" }, { status: 403 });
+    }
+
+    const makerLow = makerRaw.toLowerCase();
+    const [managedUser, managedStrategy] = await Promise.all([
+      (prisma as unknown as { managedUser: { findUnique: (args: unknown) => Promise<unknown> } }).managedUser.findUnique({
+        where: { address: makerLow },
+      }),
+      prisma.managedStrategy.findFirst({ where: { maker: makerLow } }),
+    ]);
+    if (!managedUser && !managedStrategy) {
+      return Response.json({ error: "maker not managed" }, { status: 403 });
+    }
+
+    // Log CRE-initiated deploys distinctly (server-side caps not required, CRE enforces)
+    console.log(
+      `[deploy][CRE] maker=${makerLow} strategyHash=${(strategyHashRaw as string).slice(0, 10)} pair=${pairRaw} mode=${modeRaw} reason=${String((rawBody as Record<string, unknown>).reason ?? "").slice(0, 120)}`,
+    );
+
+    // Minimal CRE body (maker, strategyHash, pair, mode, reason) -> create job and return
+    // If CRE also sends capital/pairs, fall through to full deploy pipeline below without wallet-sig
+    const hasCapitalDeploy =
+      typeof (rawBody as Record<string, unknown>).capital === "string" &&
+      typeof (rawBody as Record<string, unknown>).capitalAmount === "string" &&
+      Array.isArray((rawBody as Record<string, unknown>).pairs);
+
+    if (!hasCapitalDeploy) {
+      const job = await prisma.agentJob.create({
+        data: {
+          maker: makerLow,
+          chainId: 8453,
+          kind: "deploy",
+          status: "running",
+          steps: [
+            {
+              stage: "cre-triggered",
+              detail: `CRE rotation for ${pairRaw} ${(strategyHashRaw as string).slice(0, 10)}`,
+              reason: String((rawBody as Record<string, unknown>).reason ?? ""),
+            },
+          ],
+        },
+      });
+      await prisma.agentJob.update({
+        where: { id: job.id },
+        data: {
+          status: "done",
+          steps: [
+            {
+              stage: "cre-triggered",
+              detail: `CRE rotation for ${pairRaw}`,
+              reason: String((rawBody as Record<string, unknown>).reason ?? ""),
+            },
+          ],
+        },
+      });
+      return Response.json({
+        ok: true,
+        jobId: job.id,
+        cre: true,
+        maker: makerLow,
+        strategyHash: strategyHashRaw,
+        pair: pairRaw,
+      });
+    }
+
+    const parsedCapital = bodySchema.safeParse(rawBody);
+    if (!parsedCapital.success) {
+      return Response.json(
+        { error: "maker, capital, capitalAmount, pairs[] required" },
+        { status: 400 },
+      );
+    }
+    return runDeployPipeline(parsedCapital.data);
+  } else if (creCheck && (creCheck as Response).status === 500) {
+    // Fail-closed when CRE_API_KEY env missing
+    return creCheck;
+  }
+
+  // Wallet-sig path (dashboard flow, untouched, byte-identical behavior)
+  const parsed = bodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return Response.json(
+      { error: "maker, capital, capitalAmount, pairs[] required" },
+      { status: 400 },
+    );
+  }
+
+  const auth = await verifyDeployIntent(parsed.data as unknown as Record<string, unknown>, parsed.data.signature);
+  if (!auth.ok) {
+    return Response.json({ error: auth.error }, { status: 401 });
+  }
+
+  return runDeployPipeline(parsed.data);
 }
 
 export async function GET(req: Request) {

@@ -33,9 +33,9 @@ wallet (Calibur 7702) ── scoped key ──▶ agent relayer ──▶ Aqua (
 
 | Path         | What                                                                         |
 | ------------ | ---------------------------------------------------------------------------- |
-| `web/`       | Next.js dashboard + API (positions, deploy pipeline, delegation, agent tick) |
+| `web/`       | Next.js dashboard + API (positions, deploy pipeline, delegation, decisions history) |
 | `taker-bot/` | Autonomous taker service filling our own strategies (demo volume engine)     |
-| `cre/`       | Chainlink CRE auto-manage                                                    |
+| `cre/`       | Chainlink CRE auto-manage (owns ticking via watch workflow)                  |
 
 ## Run it
 

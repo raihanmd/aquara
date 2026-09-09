@@ -1,7 +1,7 @@
 {
   "schedule": "*/30 * * * * *",
   "makers": ["0x08Dc514b8bA9015a74972Da8bDa5027fD91943e1"],
-  "apiBase": "http://localhost:3000/api",
+  "apiBase": "https://aquara.raihanmd.xyz/api",
   "router": "0x111111338c5091e8440b67b168bae16a668ac0de",
   "aquaRegistry": "0x1111113ccf1426a8e30e2bff5e005d929bf6a90a",
   "app": "0x111111338c5091e8440b67b168bae16a668ac0de",
@@ -11,5 +11,10 @@
   "aiModel": "n8n-1",
   "aiApiKeySecretId": "AI_API_KEY",
   "aiApiKeyOwner": "0x5235401AbA9b0f597A19B48497bf174a4dA8A090",
-  "aiEnabled": true
+  "aiEnabled": true,
+  "trashMinVolumeUsd": 0.2,
+  "trashMaxApyPct": null,
+  "trashZeroVolumeBothWindows": true,
+  "demoForceTrashHashes": [],
+  "demoTrashAllAggressive": false
 }
