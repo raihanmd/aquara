@@ -14,8 +14,7 @@ name: docker-web
 
 on:
   push:
-    branches: [main]
-    tags: ['v*.*.*']
+    tags: ["v*.*.*"]
     paths:
       - "web/**"
   workflow_dispatch:
