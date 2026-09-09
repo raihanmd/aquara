@@ -1,7 +1,8 @@
 {
-  "schedule": "*/30 * * * * *",
+  "schedule": "*/15 * * * *",
   "makers": ["0x08Dc514b8bA9015a74972Da8bDa5027fD91943e1"],
   "apiBase": "https://aquara.raihanmd.xyz/api",
+  "beDeployUrl": "https://aquara.raihanmd.xyz/api/agent/deploy",
   "router": "0x111111338c5091e8440b67b168bae16a668ac0de",
   "aquaRegistry": "0x1111113ccf1426a8e30e2bff5e005d929bf6a90a",
   "app": "0x111111338c5091e8440b67b168bae16a668ac0de",
@@ -16,5 +17,11 @@
   "trashMaxApyPct": null,
   "trashZeroVolumeBothWindows": true,
   "demoForceTrashHashes": [],
-  "demoTrashAllAggressive": false
+  "demoTrashAllAggressive": false,
+  "maxRotationsPerDay": 1,
+  "dailyGasCapUsd": 1.0,
+  "minGainMultipleBps": 20000,
+  "gasCostUsd": 0.08,
+  "estGainBpsOfQuoted": 50,
+  "creApiKeySecretId": "CRE_API_KEY"
 }

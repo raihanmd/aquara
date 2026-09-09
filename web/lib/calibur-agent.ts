@@ -117,6 +117,43 @@ const TYPES = {
   ],
 } as const;
 
+// Relayer EOA nonce management. The relayer is shared by concurrent deploy
+// jobs, and viem's default pending-nonce read can return a stale value when a
+// previous send is still propagating, producing "nonce too low" and
+// "replacement transaction underpriced". So all sends from one relayer go
+// through a per-address promise chain with an explicit nonce that never goes
+// backwards, plus one retry with refreshed nonce and bumped fees.
+const submitChains = new Map<string, Promise<unknown>>();
+const lastUsedNonces = new Map<string, bigint>();
+
+function enqueueSubmit<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = submitChains.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  submitChains.set(
+    key,
+    next.catch(() => undefined),
+  );
+  return next;
+}
+
+function isNonceError(e: unknown): boolean {
+  const err = e as {
+    message?: string;
+    shortMessage?: string;
+    details?: string;
+    cause?: unknown;
+  };
+  const text =
+    `${err?.message ?? ""} ${err?.shortMessage ?? ""} ${err?.details ?? ""} ${String(err?.cause ?? "")}`.toLowerCase();
+  return (
+    text.includes("nonce too low") ||
+    text.includes("replacement transaction underpriced") ||
+    text.includes("already known")
+  );
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function agentSignAndSubmit(
   userEOA: Address,
   calls: CaliburCall[],
@@ -171,14 +208,65 @@ export async function agentSignAndSubmit(
     args: [message as any, wrappedSignature],
   });
 
-  const txHash = await walletClient.sendTransaction({
-    to: userEOA,
-    data: calldata,
-    value: 0n,
-    gas: 1_200_000n,
-    chain: base,
+  // Serialize sends per relayer so concurrent jobs never share a nonce read.
+  return enqueueSubmit(account.address.toLowerCase(), async () => {
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await sleep(2000 * attempt);
+      const pending = BigInt(
+        await publicClient.getTransactionCount({
+          address: account.address,
+          blockTag: "pending",
+        }),
+      );
+      const floor = (lastUsedNonces.get(account.address.toLowerCase()) ?? -1n) + 1n;
+      const nonce = pending > floor ? pending : floor;
+      try {
+        const txParams: {
+          to: Address;
+          data: Hex;
+          value: bigint;
+          gas: bigint;
+          chain: typeof base;
+          nonce: number;
+          maxFeePerGas?: bigint;
+          maxPriorityFeePerGas?: bigint;
+        } = {
+          to: userEOA,
+          data: calldata,
+          value: 0n,
+          gas: 1_200_000n,
+          chain: base,
+          nonce: Number(nonce),
+        };
+        if (attempt > 0) {
+          // Bump fees so a retry never looks like an underpriced replacement.
+          const fees = await publicClient.estimateFeesPerGas();
+          const mult = 120n + BigInt((attempt - 1) * 25);
+          txParams.maxFeePerGas = (fees.maxFeePerGas * mult) / 100n;
+          txParams.maxPriorityFeePerGas =
+            (fees.maxPriorityFeePerGas * mult) / 100n;
+        }
+        const txHash = await walletClient.sendTransaction(txParams);
+        lastUsedNonces.set(account.address.toLowerCase(), nonce);
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash: txHash,
+          timeout: 120_000,
+        });
+        if (receipt.status !== "success")
+          throw new Error("Batch reverted on-chain");
+        return { txHash, nonce: seq };
+      } catch (e) {
+        lastErr = e;
+        if (!isNonceError(e)) throw e;
+        // Nonce collision: refresh on next attempt. Never resubmit blindly
+        // after a receipt timeout that may have mined (seq would have moved).
+        const errText = `${(e as { message?: string })?.message ?? e}`;
+        if (errText.toLowerCase().includes("timeout")) throw e;
+      }
+    }
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error(`Relayer submit failed after retries: ${String(lastErr)}`);
   });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
-  if (receipt.status !== "success") throw new Error("Batch reverted on-chain");
-  return { txHash, nonce: seq };
 }
