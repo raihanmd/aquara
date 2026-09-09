@@ -38,12 +38,11 @@ ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# curl for HEALTHCHECK; create non-root user
+# curl for HEALTHCHECK; oven/bun images already ship a non-root `bun` user
+# (the -slim variant has no addgroup/adduser binaries, so reuse it)
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl \
-  && rm -rf /var/lib/apt/lists/* \
-  && addgroup --system --gid 1001 nodejs \
-  && adduser --system --uid 1001 nextjs
+  && rm -rf /var/lib/apt/lists/*
 
 # public may be empty; copy if exists (builder always has it, even if empty)
 COPY --from=builder /app/public ./public
@@ -55,9 +54,10 @@ COPY --from=builder /app/.next ./.next
 
 # Install production deps only and regenerate prisma client for runner arch
 RUN bun install --frozen-lockfile --production \
-  && DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy?schema=public" bunx prisma generate
+  && DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy?schema=public" bunx prisma generate \
+  && chown -R bun:bun /app
 
-USER nextjs
+USER bun
 
 EXPOSE 3000
 
