@@ -16,10 +16,9 @@ Live on **Base mainnet** (chain 8453), built on **1inch Aqua** + **Chainlink CRE
    Revoke anytime, key auto-expires in 30 days.
 2. **Deploy** — pick a pair (e.g. USDC/WETH), choose Stable or Aggressive,
    Deploy. Watch live progress: planning → swaps → ship → on-chain position.
-3. **See it work** — the position card shows live badges (In Range, Fillable,
-   range, earned).
-   (DEV AND DEMO ONLY) Run the taker bot once: it fills your own position, volume
-   and taker fees accrue on the card within minutes.
+
+(DEV AND DEMO ONLY) Run the taker bot once: it fills your own position, volume
+and taker fees accrue on the card within minutes.
 
 ## How it fits together
 
@@ -36,8 +35,7 @@ wallet (Calibur 7702) ── scoped key ──▶ agent relayer ──▶ Aqua (
 | ------------ | ---------------------------------------------------------------------------- |
 | `web/`       | Next.js dashboard + API (positions, deploy pipeline, delegation, agent tick) |
 | `taker-bot/` | Autonomous taker service filling our own strategies (demo volume engine)     |
-| `contracts/` | _(planned)_ AquaHook for Calibur + Foundry scripts                           |
-| `cre/`       | _(planned)_ Chainlink CRE auto-manage                                        |
+| `cre/`       | Chainlink CRE auto-manage                                                    |
 
 ## Run it
 
