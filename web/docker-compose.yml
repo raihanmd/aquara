@@ -26,9 +26,6 @@ services:
     env_file: [.env]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://aqua:aqua@postgres:5432/aqua?schema=public}
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: unless-stopped
 
 volumes:
