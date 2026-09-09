@@ -44,8 +44,6 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends curl \
   && rm -rf /var/lib/apt/lists/*
 
-# public may be empty; copy if exists (builder always has it, even if empty)
-COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/bun.lock ./bun.lock
 COPY --from=builder /app/prisma ./prisma
