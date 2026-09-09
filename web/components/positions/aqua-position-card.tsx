@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   useAccount,
   useChainId,
+  useConnection,
   usePublicClient,
   useSwitchChain,
   useWalletClient,
@@ -64,70 +65,42 @@ function getFeeLabel(pos: EnrichedAquaPosition): string | null {
 
 function tokenUsd(t: EnrichedAquaPosition["tokens"][number]): number {
   const bal: any = (t as any).currentBalance;
-  if (bal && typeof bal === "object" && typeof bal.usd === "number") return bal.usd ?? 0;
+  if (bal && typeof bal === "object" && typeof bal.usd === "number")
+    return bal.usd ?? 0;
   return 0;
 }
 
-function earnedUsd(tokens: EnrichedAquaPosition["tokens"]): number | null {
-  let sum = 0;
-  let ok = false;
-  for (const t of tokens ?? []) {
-    const b: any = (t as any)?.currentBalance;
-    const ib: any = (t as any)?.initialBalance;
-    const cRaw = b && typeof b === "object" ? b.raw : null;
-    const iRaw = ib && typeof ib === "object" ? ib.raw : null;
-    const cUsd = b && typeof b === "object" && typeof b.usd === "number" ? (b.usd as number) : null;
-    if (cRaw == null || iRaw == null || cUsd == null) continue;
-    try {
-      const c = Number(BigInt(String(cRaw)));
-      const i = Number(BigInt(String(iRaw)));
-      if (!(c > 0)) continue;
-      sum += cUsd - cUsd * (i / c);
-      ok = true;
-    } catch {
-      continue;
-    }
-  }
-  return ok ? sum : null;
-}
-
-function coverage(t: any): number | null {
-  const cur = t?.currentBalance?.raw;
-  const wal = t?.walletBalance?.raw ?? t?.wallet?.balance?.raw;
-  if (cur === undefined || wal === undefined || wal === null) return null;
-  try {
-    const c = BigInt(String(cur));
-    const w = BigInt(String(wal));
-    if (w === 0n) return null;
-    return Number((c * 10000n) / w) / 100;
-  } catch {
-    return null;
-  }
+function earnedUsd(position: EnrichedAquaPosition): number | null {
+  const f = position.performance?.fees;
+  const v =
+    f?.total?.usd ??
+    f?.last30d?.usd ??
+    f?.last7d?.usd ??
+    f?.last24h?.usd ??
+    null;
+  return typeof v === "number" && isFinite(v) ? v : null;
 }
 
 export function AquaPositionCard({
   position,
   mode,
-  fillable,
-  allowanceOk,
   rangeLabel,
   onClosed,
 }: {
   position: EnrichedAquaPosition;
   mode?: string | null;
-  fillable?: boolean;
-  allowanceOk?: boolean | null;
   rangeLabel?: string | null;
   onClosed?: () => void;
 }) {
   const oor = position.isOutOfRange;
+
   const illiquid = (position as any).isIlliquid === true;
   const u0 = tokenUsd(position.tokens[0]);
   const u1 = tokenUsd(position.tokens[1]);
   const hasBreakdown = u0 + u1 > 0;
   const sizeUsd = hasBreakdown ? u0 + u1 : 0;
 
-  const { address } = useAccount();
+  const { address } = useConnection();
   const publicClient = usePublicClient({ chainId: base.id });
   const { data: walletClient } = useWalletClient();
   const chainId = useChainId();
@@ -193,7 +166,7 @@ export function AquaPositionCard({
         position.performance?.fees?.total?.apy ??
         null
       }
-      earned={earnedUsd(position.tokens)}
+      earned={earnedUsd(position)}
       volume={
         position.performance?.volume?.last24h?.usd ??
         position.performance?.volume?.last7d?.usd ??
@@ -209,7 +182,10 @@ export function AquaPositionCard({
               Illiquid
             </Badge>
           ) : oor ? (
-            <Badge variant="destructive" className="rounded-md px-2 py-0.5 text-[10px] font-medium">
+            <Badge
+              variant="destructive"
+              className="rounded-md px-2 py-0.5 text-[10px] font-medium"
+            >
               Out of Range
             </Badge>
           ) : (
@@ -221,60 +197,21 @@ export function AquaPositionCard({
       }
       extra={
         <div className="space-y-1.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span
-              title={
-                fillable
-                  ? allowanceOk === false
-                    ? "Balances exist but Aqua allowance is missing - fills will revert"
-                    : "Fillable"
-                  : "Not fillable"
-              }
-              className={cn(
-                "inline-flex items-center gap-1 rounded-md border border-transparent px-2 py-0.5 text-[10px] font-medium",
-                fillable && allowanceOk !== false
-                  ? "bg-green-500/15 text-green-600"
-                  : fillable
-                    ? "bg-amber-500/15 text-amber-600"
-                    : "bg-muted text-muted-foreground",
-              )}
-            >
-              <span
-                className={cn(
-                  "size-1.5 rounded-full",
-                  fillable && allowanceOk !== false
-                    ? "bg-green-500"
-                    : fillable
-                      ? "bg-amber-500"
-                      : "bg-muted-foreground/40",
-                )}
-              />
-              {fillable ? (allowanceOk === false ? "Approve needed" : "Fillable") : "Thin"}
-            </span>
+          <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
             {mode === "aggressive" && (
               <Badge className="rounded-md bg-amber-500/15 text-amber-600 border-transparent px-2 py-0.5 text-[10px] font-medium">
                 Aggressive
               </Badge>
             )}
             {rangeLabel && (
-              <Badge variant="outline" className="rounded-md px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              <Badge
+                variant="outline"
+                className="rounded-md px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+              >
                 {rangeLabel}
               </Badge>
             )}
           </div>
-          {position.priceRange?.lower !== undefined ||
-          position.priceRange?.upper !== undefined ? (
-            <div className="text-[11px] text-muted-foreground/60">
-              Range:{" "}
-              {position.priceRange?.lower != null
-                ? String(position.priceRange.lower)
-                : "-"}{" "}
-              →{" "}
-              {position.priceRange?.upper != null
-                ? String(position.priceRange.upper)
-                : "-"}
-            </div>
-          ) : null}
         </div>
       }
       footer={

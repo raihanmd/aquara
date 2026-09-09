@@ -1,13 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useAccount } from "wagmi";
+import { useAccount, useConnection } from "wagmi";
 
-// ── Demo address (user's deployed ship on Base) ──────────────────────────
-export const DEMO_ADDRESS =
-  "0xCbAfD2B1c1309b1701E9ef7e4d38C93425A6b61A" as const;
-
-// ── Types ─────────────────────────────────────────────────────────────────
 export interface AquaToken {
   address: string;
   symbol?: string;
@@ -60,7 +55,7 @@ export interface EnrichedAquaPosition {
   _raw?: Record<string, unknown>;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
+// Helpers
 
 export function isAquaIlliquid(
   classification: EnrichedAquaPosition["classification"],
@@ -85,6 +80,7 @@ export function isAquaOutOfRange(
   tokens: AquaToken[],
 ): boolean {
   let anyKnown = false;
+  let anyFunded = false;
   for (const t of tokens) {
     const bal: any = t.currentBalance;
     const raw = typeof bal === "object" && bal !== null ? bal.raw : bal;
@@ -93,11 +89,21 @@ export function isAquaOutOfRange(
     if (balStr === "" || balStr === "0x") continue;
     anyKnown = true;
     const num = Number(balStr);
-    if (!isNaN(num) && num > 0) return false;
-    if (isNaN(num) && balStr !== "0" && balStr !== "0x0") return false;
+    if (
+      (!isNaN(num) && num > 0) ||
+      (isNaN(num) && balStr !== "0" && balStr !== "0x0")
+    ) {
+      anyFunded = true;
+      continue;
+    }
+    const ib: any = (t as any)?.initialBalance;
+    const iraw = ib && typeof ib === "object" ? ib.raw : ib;
+    if (iraw === undefined || iraw === null) continue;
+    const inum = Number(String(iraw).trim());
+    if (!isNaN(inum) && inum > 0) return true;
   }
 
-  return anyKnown;
+  return anyKnown && !anyFunded;
 }
 
 function normalizeToken(raw: Record<string, unknown>): AquaToken {
@@ -156,7 +162,6 @@ function normalizeAquaPosition(
   };
 }
 
-// ── Fetch via same-origin relayer (key stays server-side) ───────────────────
 async function fetchAquaPositionsForMaker(
   maker: string,
 ): Promise<EnrichedAquaPosition[]> {
@@ -180,21 +185,8 @@ async function fetchAquaPositionsForMaker(
   );
 }
 
-// ── Hook ──────────────────────────────────────────────────────────────────
-
-/**
- * CRE rebalance reference - batch pattern for ship/dock:
- *   batch [approve(token0, Aqua, amount), approve(token1, Aqua, amount), ship(app, strategy, tokens, amounts)]
- * The Aqua ship requires both tokens approved to Aqua (0x1111113ccf1426a8e30e2bff5e005d929bf6a90a)
- * before calling ship. For CRE, encode as a single BatchedCall with 3 calls:
- *   1. ERC20 approve token0 -> Aqua
- *   2. ERC20 approve token1 -> Aqua
- *   3. Aqua ship(app, strategyBytes, tokens[], amounts[])
- * Dock is similar: dock(app, strategyHash) after withdrawing.
- */
-
 export function useMyAquaPositions() {
-  const { address } = useAccount();
+  const { address } = useConnection();
 
   const query = useQuery({
     queryKey: ["aqua", "my-positions", address] as const,

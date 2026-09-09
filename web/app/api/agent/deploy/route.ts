@@ -13,6 +13,7 @@ import { base } from "viem/chains";
 import { prisma } from "@/lib/prisma";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
 import { AQUA_BASE, aquaHeaders } from "@/lib/aqua-api";
+import { verifyDeployIntent } from "@/lib/deploy-auth";
 import { agentSignAndSubmit, type CaliburCall } from "@/lib/calibur-agent";
 
 export const dynamic = "force-dynamic";
@@ -27,8 +28,11 @@ const bodySchema = z.object({
     .array(z.object({ tokenA: ADDR, tokenB: ADDR }))
     .min(1)
     .max(5),
-  mode: z.enum(["conservative", "aggressive"]).default("conservative"),
+  mode: z.enum(["stable", "aggressive"]).default("stable"),
   slippage: z.coerce.number().min(0.05).max(10).optional(),
+  signature: z.string().regex(/^0x[a-fA-F0-9]+$/),
+  nonce: z.string().min(1),
+  expiry: z.string().min(1),
 });
 
 const ERC20_MIN = [
@@ -62,7 +66,6 @@ const ERC20_MIN = [
   },
 ] as const;
 
-const APPROVE_SELECTOR = "0x095ea7b3";
 const V6_ROUTER = "0x111111125421ca6dc452d289314280a0f8842a65" as Address;
 
 async function usdPrices(
@@ -83,7 +86,8 @@ async function usdPrices(
     if (res.ok) {
       const json = await res.json();
       for (const t of tokens) out.set(t.toLowerCase(), pick(json, t));
-      if ([...out.values()].every((v) => v === null)) throw new Error("empty batch");
+      if ([...out.values()].every((v) => v === null))
+        throw new Error("empty batch");
       return out;
     }
   } catch {}
@@ -178,14 +182,15 @@ async function quoteSwap(
       }
       throw new Error(desc || `Swap quote failed (${res.status})`);
     }
-  const json = await res.json();
-  const outRaw = json.toAmount ?? json.dstAmount ?? json.toTokenAmount ?? null;
-  return {
-    to: json.tx.to as Address,
-    data: json.tx.data as Hex,
-    value: BigInt(json.tx.value ?? 0),
-    out: outRaw !== null && outRaw !== undefined ? BigInt(outRaw) : null,
-  };
+    const json = await res.json();
+    const outRaw =
+      json.toAmount ?? json.dstAmount ?? json.toTokenAmount ?? null;
+    return {
+      to: json.tx.to as Address,
+      data: json.tx.data as Hex,
+      value: BigInt(json.tx.value ?? 0),
+      out: outRaw !== null && outRaw !== undefined ? BigInt(outRaw) : null,
+    };
   }
 }
 
@@ -193,13 +198,16 @@ async function quoteOut(
   src: string,
   dst: string,
   amount: bigint,
-  apiKey: string
+  apiKey: string,
 ): Promise<bigint | null> {
   try {
     const qs = new URLSearchParams({ src, dst, amount: amount.toString() });
-    const res = await fetch(`https://api.1inch.com/swap/v6.1/8453/quote?${qs}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
+    const res = await fetch(
+      `https://api.1inch.com/swap/v6.1/8453/quote?${qs}`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      },
+    );
     if (!res.ok) return null;
     const json = await res.json();
     const raw = json.toAmount ?? json.dstAmount ?? json.toTokenAmount ?? null;
@@ -218,6 +226,11 @@ export async function POST(req: Request) {
     );
   }
   const { maker, capital, capitalAmount, pairs, mode } = parsed.data;
+
+  const auth = await verifyDeployIntent(parsed.data as unknown as Record<string, unknown>, parsed.data.signature);
+  if (!auth.ok) {
+    return Response.json({ error: auth.error }, { status: 401 });
+  }
 
   const settingsRow = await (prisma as any).makerSettings.findUnique({
     where: { maker: maker.toLowerCase() },
@@ -317,7 +330,10 @@ export async function POST(req: Request) {
         const allToks = [
           ...new Set([
             capLow,
-            ...pairs.flatMap((p) => [p.tokenA.toLowerCase(), p.tokenB.toLowerCase()]),
+            ...pairs.flatMap((p) => [
+              p.tokenA.toLowerCase(),
+              p.tokenB.toLowerCase(),
+            ]),
           ]),
         ];
         const [inv, allocMap, prices] = await Promise.all([
@@ -366,9 +382,13 @@ export async function POST(req: Request) {
         allToks.forEach((t, k) => {
           const d = (inv as any)[k] as any;
           const b = (inv as any)[k + allToks.length] as any;
-          if (!d || d.status !== "success") throw new Error(`cannot read token ${t.slice(0, 6)} on-chain`);
+          if (!d || d.status !== "success")
+            throw new Error(`cannot read token ${t.slice(0, 6)} on-chain`);
           decMap.set(t, Number(d.result));
-          walletMap.set(t, b && b.status === "success" ? (b.result as bigint) : 0n);
+          walletMap.set(
+            t,
+            b && b.status === "success" ? (b.result as bigint) : 0n,
+          );
         });
         const unalloc = new Map<string, bigint>(
           allToks.map((t) => {
@@ -377,16 +397,24 @@ export async function POST(req: Request) {
           }),
         );
         const capPrice = prices.get(capLow) ?? null;
-        if (!capPrice) throw new Error(`USD price unavailable for capital - cannot plan budgets`);
+        if (!capPrice)
+          throw new Error(
+            `USD price unavailable for capital - cannot plan budgets`,
+          );
         for (const t of allToks) {
           if ((prices.get(t) ?? null) === null)
-            throw new Error(`USD price unavailable for ${t.slice(0, 6)} - cannot plan budgets`);
+            throw new Error(
+              `USD price unavailable for ${t.slice(0, 6)} - cannot plan budgets`,
+            );
         }
-        const totalUsd = (Number(total) / 10 ** (decMap.get(capLow) ?? 18)) * capPrice;
+        const totalUsd =
+          (Number(total) / 10 ** (decMap.get(capLow) ?? 18)) * capPrice;
         const perPairUsd = totalUsd / pairs.length;
 
         const maySwap = pairs.some(
-          (p) => p.tokenA.toLowerCase() !== capLow || p.tokenB.toLowerCase() !== capLow,
+          (p) =>
+            p.tokenA.toLowerCase() !== capLow ||
+            p.tokenB.toLowerCase() !== capLow,
         );
         if (maySwap) {
           const allowRouter = (await publicClient.readContract({
@@ -401,9 +429,17 @@ export async function POST(req: Request) {
                 `approve router missing and ${capital.slice(0, 6)}… not whitelisted - approve ${V6_ROUTER.slice(0, 6)}… in your wallet first`,
               );
             }
-            await pushStep({ pair: 0, stage: "approving", detail: "router allowance via agent" });
+            await pushStep({
+              pair: 0,
+              stage: "approving",
+              detail: "router allowance via agent",
+            });
             await agentSignAndSubmit(maker as Address, [
-              { to: capital as Address, value: 0n, data: encodeApprove(V6_ROUTER, maxUint256) },
+              {
+                to: capital as Address,
+                value: 0n,
+                data: encodeApprove(V6_ROUTER, maxUint256),
+              },
             ]);
             const t0 = Date.now();
             for (;;) {
@@ -457,9 +493,13 @@ export async function POST(req: Request) {
                 `pair ${i + 1}: capital shortfall ${formatUnits(short, decMap.get(side) ?? 18)} - wallet cannot cover`,
               );
             const shortUsd =
-              (Number(short) / 10 ** (decMap.get(side) ?? 18)) * (prices.get(side) ?? 0);
+              (Number(short) / 10 ** (decMap.get(side) ?? 18)) *
+              (prices.get(side) ?? 0);
             let inCap = BigInt(
-              Math.ceil((shortUsd / (capPrice as number)) * 10 ** (decMap.get(capLow) ?? 18)),
+              Math.ceil(
+                (shortUsd / (capPrice as number)) *
+                  10 ** (decMap.get(capLow) ?? 18),
+              ),
             );
             if (inCap === 0n) inCap = 1n;
             const capHave = unalloc.get(capLow) ?? 0n;
@@ -467,30 +507,65 @@ export async function POST(req: Request) {
               throw new Error(
                 `pair ${i + 1}: capital shortfall - need ${formatUnits(inCap, decMap.get(capLow) ?? 18)} more`,
               );
-            const q = await quoteSwap(capital, side, inCap, maker, slippage, apiKey);
+            const q = await quoteSwap(
+              capital,
+              side,
+              inCap,
+              maker,
+              slippage,
+              apiKey,
+            );
             if (q.out === null || q.out === 0n)
-              throw new Error(`pair ${i + 1}: no route ${capital.slice(0, 6)}→${side.slice(0, 6)}`);
+              throw new Error(
+                `pair ${i + 1}: no route ${capital.slice(0, 6)}→${side.slice(0, 6)}`,
+              );
             unalloc.set(capLow, capHave - inCap);
             capSpent += inCap;
-            swaps.push({ to: q.to, value: q.value, data: q.data, inRaw: inCap, outRaw: q.out, token: side });
+            swaps.push({
+              to: q.to,
+              value: q.value,
+              data: q.data,
+              inRaw: inCap,
+              outRaw: q.out,
+              token: side,
+            });
             return fromWallet + q.out;
           };
           needA = await cover(aLow, needA);
           needB = await cover(bLow, needB);
-          devLog(`pair ${i} needs`, { needA: needA.toString(), needB: needB.toString(), swaps: swaps.length });
+          devLog(`pair ${i} needs`, {
+            needA: needA.toString(),
+            needB: needB.toString(),
+            swaps: swaps.length,
+          });
 
           let range: { min: string; max: string } | null = null;
           {
             const pA = prices.get(aLow) as number;
             const pB = prices.get(bLow) as number;
-            const r = rangeAroundSpot(pair.tokenA, pair.tokenB, 1 / pA, 1 / pB, decA, decB);
+            const r = rangeAroundSpot(
+              pair.tokenA,
+              pair.tokenB,
+              1 / pA,
+              1 / pB,
+              decA,
+              decB,
+            );
             if (r) {
               range = { min: r.min.toString(), max: r.max.toString() };
-              devLog(`pair ${i} range`, { min: range.min, max: range.max, pA, pB });
+              devLog(`pair ${i} range`, {
+                min: range.min,
+                max: range.max,
+                pA,
+                pB,
+              });
             }
           }
           const salt = runSalt * 1000n + BigInt(i);
-          let program = withFee(withSalt((vmSdk.AquaXYCAmmStrategy as any).new(), salt), 5).build();
+          let program = withFee(
+            withSalt((vmSdk.AquaXYCAmmStrategy as any).new(), salt),
+            5,
+          ).build();
           if (range) {
             try {
               program = withFee(
@@ -504,7 +579,10 @@ export async function POST(req: Request) {
                 10,
               ).build();
             } catch {
-              program = withFee(withSalt((vmSdk.AquaXYCAmmStrategy as any).new(), salt), 5).build();
+              program = withFee(
+                withSalt((vmSdk.AquaXYCAmmStrategy as any).new(), salt),
+                5,
+              ).build();
               range = null;
             }
           }
@@ -515,13 +593,26 @@ export async function POST(req: Request) {
           });
           const strategy = order.encode().toString();
           const strategyHash: string =
-            typeof aquaSdk.AquaProtocolContract.calculateStrategyHash === "function"
-              ? aquaSdk.AquaProtocolContract.calculateStrategyHash(strategy).toString()
+            typeof aquaSdk.AquaProtocolContract.calculateStrategyHash ===
+            "function"
+              ? aquaSdk.AquaProtocolContract.calculateStrategyHash(
+                  strategy,
+                ).toString()
               : "";
           plans.push({
-            idx: i, label,
-            tokenA: pair.tokenA, tokenB: pair.tokenB, decA, decB,
-            needA, needB, swaps, strategy, strategyHash, range, capSpent,
+            idx: i,
+            label,
+            tokenA: pair.tokenA,
+            tokenB: pair.tokenB,
+            decA,
+            decB,
+            needA,
+            needB,
+            swaps,
+            strategy,
+            strategyHash,
+            range,
+            capSpent,
           });
         }
 
@@ -534,7 +625,12 @@ export async function POST(req: Request) {
         for (const plan of plans) {
           for (const s of plan.swaps) {
             try {
-              await publicClient.call({ to: s.to, data: s.data, value: s.value, account: maker as Address });
+              await publicClient.call({
+                to: s.to,
+                data: s.data,
+                value: s.value,
+                account: maker as Address,
+              });
             } catch (e: any) {
               throw new Error(
                 `pair ${plan.idx + 1} simulation failed - refusing to spend gas (${e?.shortMessage || e?.message || "swap would revert"})`,
@@ -568,7 +664,11 @@ export async function POST(req: Request) {
           };
         }
 
-        await pushStep({ pair: 0, stage: "validated", detail: "all calls simulated - executing" });
+        await pushStep({
+          pair: 0,
+          stage: "validated",
+          detail: "all calls simulated - executing",
+        });
 
         function swapsTotal(ps: PairPlan[]): number {
           return ps.reduce((n, p) => n + p.swaps.length, 0);
@@ -618,10 +718,60 @@ export async function POST(req: Request) {
                 stage: "swapping",
                 detail: `${plan.swaps.length} swap(s) via 1inch (slippage ${slippage}%)`,
               });
-              const { txHash: swapHash } = await agentSignAndSubmit(
-                maker as Address,
-                plan.swaps.map((s) => ({ to: s.to, value: s.value, data: s.data })),
+              devLog(
+                `pair ${i} swapCalls`,
+                plan.swaps.map((s) => ({
+                  to: s.to,
+                  value: String(s.value ?? 0),
+                  dataLen: (s.data?.length ?? 2) - 2,
+                  inRaw: s.inRaw.toString(),
+                })),
               );
+              let swapHash = "";
+              for (let si = 0; si < plan.swaps.length; si++) {
+                const leg = plan.swaps[si];
+                const submitOne = async (data: Hex) => {
+                  const { txHash } = await agentSignAndSubmit(
+                    maker as Address,
+                    [{ to: leg.to, value: leg.value, data }],
+                  );
+                  return txHash;
+                };
+                try {
+                  swapHash = await submitOne(leg.data);
+                } catch (e: any) {
+                  devLog(`pair ${i} swap ${si} submit failed`, {
+                    message: e?.message,
+                    shortMessage: e?.shortMessage,
+                    details: e?.details,
+                    cause: String(e?.cause?.message ?? e?.cause ?? "").slice(
+                      0,
+                      500,
+                    ),
+                  });
+                  try {
+                    await pushStep({
+                      pair: i,
+                      stage: "swapping",
+                      detail: `retry swap ${si + 1}/${plan.swaps.length} with fresh quote`,
+                    });
+                    const fresh = await quoteSwap(
+                      capital,
+                      leg.token,
+                      leg.inRaw,
+                      maker,
+                      slippage,
+                      apiKey,
+                    );
+                    swapHash = await submitOne(fresh.data);
+                  } catch (e2: any) {
+                    devLog(`pair ${i} swap ${si} retry failed`, {
+                      message: (e2 as any)?.message ?? e2,
+                    });
+                    throw e2;
+                  }
+                }
+              }
               await pushStep({
                 pair: i,
                 stage: "swapped",
@@ -642,8 +792,10 @@ export async function POST(req: Request) {
             const postA = await awaitFresh(plan.tokenA, preA);
             const postB = await awaitFresh(plan.tokenB, preB);
             devLog(`pair ${i} deltas`, {
-              preA: preA.toString(), postA: postA.toString(),
-              preB: preB.toString(), postB: postB.toString(),
+              preA: preA.toString(),
+              postA: postA.toString(),
+              preB: preB.toString(),
+              postB: postB.toString(),
             });
             const gotA = postA > preA ? postA - preA : 0n;
             const gotB = postB > preB ? postB - preB : 0n;
@@ -673,7 +825,11 @@ export async function POST(req: Request) {
                 }
               }
               if (missing.length > 0) {
-                await pushStep({ pair: i, stage: "approving", detail: "aqua allowance via agent" });
+                await pushStep({
+                  pair: i,
+                  stage: "approving",
+                  detail: "aqua allowance via agent",
+                });
                 await agentSignAndSubmit(
                   maker as Address,
                   missing.map((m) => ({
@@ -685,7 +841,11 @@ export async function POST(req: Request) {
               }
             }
             if (plan.range) {
-              await pushStep({ pair: i, stage: "ranged", detail: "concentrated +-10% around spot" });
+              await pushStep({
+                pair: i,
+                stage: "ranged",
+                detail: "concentrated +-10% around spot",
+              });
             }
             const shipCall = (plan as any).shipCall as CaliburCall;
             await pushStep({
@@ -693,25 +853,46 @@ export async function POST(req: Request) {
               stage: "shipping",
               detail: `${formatUnits(plan.needA, plan.decA)} + ${formatUnits(plan.needB, plan.decB)} to ship`,
             });
-            devLog(`pair ${i} shipCall`, { to: shipCall.to, dataLen: (shipCall.data?.length ?? 2) - 2, value: String(shipCall.value ?? 0) });
+            devLog(`pair ${i} shipCall`, {
+              to: shipCall.to,
+              dataLen: (shipCall.data?.length ?? 2) - 2,
+              value: String(shipCall.value ?? 0),
+            });
             let txHash: string;
             try {
-              ({ txHash } = await agentSignAndSubmit(maker as Address, [shipCall]));
+              ({ txHash } = await agentSignAndSubmit(maker as Address, [
+                shipCall,
+              ]));
             } catch (e: any) {
               devLog(`pair ${i} ship submit failed`, {
                 message: e?.message,
                 shortMessage: e?.shortMessage,
                 details: e?.details,
-                cause: String(e?.cause?.message ?? e?.cause ?? "").slice(0, 500),
+                cause: String(e?.cause?.message ?? e?.cause ?? "").slice(
+                  0,
+                  500,
+                ),
               });
               throw e;
             }
-            await pushStep({ pair: i, stage: "deployed", detail: plan.label, txHash });
+            await pushStep({
+              pair: i,
+              stage: "deployed",
+              detail: plan.label,
+              txHash,
+            });
             try {
               if (plan.strategyHash) {
                 await prisma.managedStrategy.upsert({
                   where: { strategyHash: plan.strategyHash },
-                  update: { mode, priceMin: plan.range?.min ?? null, priceMax: plan.range?.max ?? null, strategyBytes: plan.strategy, tokenA: plan.tokenA.toLowerCase(), tokenB: plan.tokenB.toLowerCase() },
+                  update: {
+                    mode,
+                    priceMin: plan.range?.min ?? null,
+                    priceMax: plan.range?.max ?? null,
+                    strategyBytes: plan.strategy,
+                    tokenA: plan.tokenA.toLowerCase(),
+                    tokenB: plan.tokenB.toLowerCase(),
+                  },
                   create: {
                     strategyHash: plan.strategyHash,
                     maker: maker.toLowerCase(),

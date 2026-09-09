@@ -44,13 +44,6 @@ function netSizeUsd(
   return total;
 }
 
-/**
- * CRE rebalance reference - batch [approve token0, approve token1, ship(app, strategy, tokens, amounts)]
- * Aqua ship requires both tokens approved to Aqua (0x1111113ccf1426a8e30e2bff5e005d929bf6a90a) before ship.
- * Example deployed: WETH 0x4200000000000000000000000000000000000006 + wstETH 0xc1CBa3fcea344f92D9239c08C0568F6F2f0EE452
- * tx 0xb8de0f... on Base chain 8453. OOR position at 0xCbAfD2B1c1309b1701E9ef7e4d38C93425A6b61A.
- */
-
 export function PositionsGrid() {
   const { positions, isLoading, error, effectiveMaker, refresh } =
     useMyAquaPositions();
@@ -105,9 +98,13 @@ export function PositionsGrid() {
     if (!effectiveMaker || !publicClient || positions.length === 0) return;
     const toks = [
       ...new Set(
-        positions.flatMap((p) =>
-          ((p as any)?.tokens ?? []).map((t: any) => String(t?.address ?? "").toLowerCase()),
-        ).filter(Boolean),
+        positions
+          .flatMap((p) =>
+            ((p as any)?.tokens ?? []).map((t: any) =>
+              String(t?.address ?? "").toLowerCase(),
+            ),
+          )
+          .filter(Boolean),
       ),
     ];
     if (toks.length === 0) return;
@@ -122,7 +119,10 @@ export function PositionsGrid() {
                 name: "allowance",
                 type: "function",
                 stateMutability: "view",
-                inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
+                inputs: [
+                  { name: "owner", type: "address" },
+                  { name: "spender", type: "address" },
+                ],
                 outputs: [{ type: "uint256" }],
               },
             ] as const,
@@ -133,7 +133,8 @@ export function PositionsGrid() {
         if (cancelled) return;
         const m: Record<string, string> = {};
         res.forEach((r, k) => {
-          if (r?.status === "success") m[toks[k]] = (r.result as bigint).toString();
+          if (r?.status === "success")
+            m[toks[k]] = (r.result as bigint).toString();
         });
         setAllowMap(m);
       } catch {}
@@ -313,7 +314,7 @@ export function PositionsGrid() {
                 </div>
                 {[0, 1].map((r) => (
                   <div key={r} className="flex items-center gap-2 py-1.5">
-                    <Skeleton className="size-[18px] rounded-full" />
+                    <Skeleton className="size-4.5 rounded-full" />
                     <Skeleton className="h-3.5 w-16" />
                     <Skeleton className="h-3.5 w-12 ml-auto" />
                   </div>
@@ -368,10 +369,6 @@ export function PositionsGrid() {
                     return 0n;
                   }
                 };
-                const fillable =
-                  toks.length >= 2 &&
-                  rawOf(toks[0]) > 0n &&
-                  rawOf(toks[1]) > 0n;
                 const allowOk = (t: any) => {
                   const v = allowMap[String(t?.address ?? "").toLowerCase()];
                   if (v === undefined) return null;
@@ -383,7 +380,7 @@ export function PositionsGrid() {
                 };
                 const a0 = allowOk(toks[0]);
                 const a1 = allowOk(toks[1]);
-                const allowanceOk = a0 === null || a1 === null ? null : Boolean(a0 && a1);
+
                 const rg = rangeMap[hashKey];
                 let rangeLabel: string | null = null;
                 if (rg && toks.length >= 2) {
@@ -396,16 +393,38 @@ export function PositionsGrid() {
                       String(toks[1]?.address ?? "").toLowerCase();
                     const decHi = hiIs0 ? d0 : d1;
                     const decLo = hiIs0 ? d1 : d0;
-                    const symHi = hiIs0 ? toks[0]?.symbol : toks[1]?.symbol;
-                    const f = (v: string) => {
-                      const n = (Number(v) * 10 ** (decLo - decHi)) / 1e18;
-                      if (!isFinite(n) || n <= 0) return "?";
-                      return n.toLocaleString("en-US", {
-                        notation: "compact",
-                        maximumFractionDigits: 2,
-                      });
+                    const hHiPerLo = (v: string) =>
+                      (Number(v) * 10 ** (decLo - decHi)) / 1e18;
+                    const symOf = (t: any) => t?.symbol ?? "";
+                    const hiTok = toks[hiIs0 ? 0 : 1];
+                    const loTok = toks[hiIs0 ? 1 : 0];
+                    const isStable = (t: any) =>
+                      [
+                        "USDC",
+                        "USDT",
+                        "DAI",
+                        "USDBC",
+                        "EURC",
+                        "LUSD",
+                        "FRAX",
+                      ].includes(String(t?.symbol ?? "").toUpperCase());
+                    const quoteHi = isStable(hiTok) || !isStable(loTok);
+                    const toDisp = (v: string) => {
+                      const h = hHiPerLo(v);
+                      if (!isFinite(h) || h <= 0) return "?";
+                      const q = quoteHi ? h : 1 / h;
+                      if (!isFinite(q) || q <= 0) return "?";
+                      return q < 0.01
+                        ? q.toFixed(6)
+                        : q.toLocaleString("en-US", {
+                            notation: "compact",
+                            maximumFractionDigits: 2,
+                          });
                     };
-                    rangeLabel = `${f(rg.min)}–${f(rg.max)}${symHi ? ` ${symHi}` : ""}`;
+                    const symQ = quoteHi ? hiTok?.symbol : loTok?.symbol;
+                    rangeLabel = quoteHi
+                      ? `${toDisp(rg.min)}–${toDisp(rg.max)}${symQ ? ` ${symQ}` : ""}`
+                      : `${toDisp(rg.max)}–${toDisp(rg.min)}${symQ ? ` ${symQ}` : ""}`;
                   }
                 }
                 return (
@@ -413,8 +432,6 @@ export function PositionsGrid() {
                     key={slot.position.strategyHash + idx}
                     position={slot.position}
                     mode={modeMap[hashKey] ?? null}
-                    fillable={fillable}
-                    allowanceOk={allowanceOk}
                     rangeLabel={rangeLabel}
                     onClosed={() => refresh()}
                   />
