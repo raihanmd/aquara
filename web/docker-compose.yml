@@ -1,5 +1,9 @@
+# Default: `docker compose up -d` starts postgres only (dev, existing behavior).
+# GHCR image: `TAG=v1.2.3 WEB_IMAGE=ghcr.io/<owner>/aquara-web docker compose --profile ghcr up -d`
+# App reachable at http://localhost:3677 when web profile is enabled.
 services:
   postgres:
+    profiles: ["dev"]
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -15,6 +19,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+  web:
+    profiles: ["ghcr"]
+    image: ${WEB_IMAGE:-ghcr.io/raihanmd/aquara-web}:${TAG:-latest}
+    ports: ["3677:3000"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://aqua:aqua@postgres:5432/aqua?schema=public}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
