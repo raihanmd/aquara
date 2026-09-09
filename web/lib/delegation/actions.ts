@@ -297,8 +297,7 @@ export function buildRevokeCall(userAddress: Address, keyHash: Hex): Call {
 // static call, and read the exact EIP-712 domain on-chain (EIP-5267) so
 // signatures always match the deployed implementation.
 
-export function parse7702Target(code: string | undefined | null): Address | null {
-  if (!code) return null;
+export function parse7702Target(code: string | undefined | null): Address | null {  if (!code) return null;
   const lower = code.toLowerCase();
   if (!lower.startsWith("0xef0100") || lower.length < 48) return null;
   return ("0x" + lower.slice(8, 48)) as Address;

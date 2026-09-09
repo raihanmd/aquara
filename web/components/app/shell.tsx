@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useAccount } from "wagmi";
+import { useConnection } from "wagmi";
 import { useIsFetching, useQueryClient } from "@tanstack/react-query";
 import { RefreshCwIcon } from "lucide-react";
 import { ConnectButton } from "../connect-button";
@@ -14,31 +13,22 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { useMutateSetting, useSetting } from "@/hooks/use-setting";
 
 const SLIPPAGE_PRESETS = [0.1, 0.5, 1, 2];
 
 function SlippageControl() {
-  const { address } = useAccount();
-  const [slippage, setSlippage] = useState<number>(0.5);
-
-  useEffect(() => {
-    if (!address) return;
-    fetch(`/api/settings?maker=${address}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => {
-        if (typeof j?.slippage === "number") setSlippage(j.slippage);
-      })
-      .catch(() => {});
-  }, [address]);
+  const { address } = useConnection();
+  const { data } = useSetting(address);
+  const { mutateAsync } = useMutateSetting(address!);
 
   const save = async (v: number) => {
-    setSlippage(v);
     if (!address) return;
-    await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ maker: address, slippage: v }),
-    }).catch(() => {});
+
+    await mutateAsync({
+      maker: address,
+      slippage: v,
+    });
   };
 
   return (
@@ -51,14 +41,14 @@ function SlippageControl() {
           disabled={!address}
           title="Global slippage for agent swaps"
         >
-          Slip {slippage}%
+          Slip {data?.slippage}%
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>Agent slippage</DropdownMenuLabel>
         {SLIPPAGE_PRESETS.map((v) => (
           <DropdownMenuItem key={v} onClick={() => save(v)}>
-            {v}%{v === slippage ? " ✓" : ""}
+            {v}%{v === data?.slippage ? " ✓" : ""}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -82,7 +72,9 @@ export function AppShell() {
             title="Refresh all data"
             aria-label="Refresh all data"
           >
-            <RefreshCwIcon className={fetching > 0 ? "size-3.5 animate-spin" : "size-3.5"} />
+            <RefreshCwIcon
+              className={fetching > 0 ? "size-3.5 animate-spin" : "size-3.5"}
+            />
           </Button>
           <ConnectButton />
         </div>

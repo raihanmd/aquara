@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm, Controller, FormProvider, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useAccount, usePublicClient } from "wagmi";
+import { useAccount, usePublicClient, useSignMessage } from "wagmi";
 import { base } from "wagmi/chains";
 import type { Address } from "viem";
 import { Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
@@ -27,6 +28,7 @@ import {
   type FormValues,
   type TokenOpt,
 } from "./deploy-dialog/schema";
+import { buildDeployMessage } from "@/lib/deploy-auth";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 
@@ -40,6 +42,7 @@ export function DeployDialog({
   onDone?: () => void;
 }) {
   const { address } = useAccount();
+  const { signMessageAsync } = useSignMessage();
   const { data: tops } = useTopPositions({
     chainIds: [8453],
     limit: 6,
@@ -233,6 +236,27 @@ export function DeployDialog({
     setSubmitError(null);
     setTxHashes([]);
     setLiveSteps({});
+    const deployMode = v.aggressive ? "aggressive" : "stable";
+    const nonce = String(Date.now());
+    const expiry = String(Date.now() + 5 * 60 * 1000);
+    let signature: string;
+    try {
+      signature = await signMessageAsync({
+        message: buildDeployMessage({
+          maker: address,
+          capital: v.capital,
+          capitalAmount: v.capitalAmount,
+          pairs,
+          mode: deployMode,
+          nonce,
+          expiry,
+        }),
+      });
+    } catch {
+      setSubmitError("Signature rejected - deploy cancelled");
+      setBusy(false);
+      return;
+    }
     try {
       const res = await fetch("/api/agent/deploy", {
         method: "POST",
@@ -242,7 +266,10 @@ export function DeployDialog({
           capital: v.capital,
           capitalAmount: v.capitalAmount,
           pairs,
-          mode: v.aggressive ? "aggressive" : "conservative",
+          mode: deployMode,
+          signature,
+          nonce,
+          expiry,
         }),
       });
       if (!res.ok && !res.body) {
@@ -291,9 +318,16 @@ export function DeployDialog({
       }
       if (hashes.length > 0) onDone?.();
       if (doneOk) {
+        const symOf = (a: string) =>
+          sortedTokens.find((t) => t.address.toLowerCase() === a.toLowerCase())?.symbol ??
+          a.slice(0, 6);
+        const names = pairs.map((p) => `${symOf(p.tokenA)}/${symOf(p.tokenB)}`);
+        const label =
+          names.length <= 2
+            ? names.join(", ")
+            : `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
+        toast.success(`Deployed ${label}`);
         form.reset();
-        setLiveSteps({});
-        setTxHashes([]);
       }
     } catch (e: any) {
       setSubmitError(e?.shortMessage || e?.message || "Deploy failed");

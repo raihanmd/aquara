@@ -8,7 +8,7 @@ const postSchema = z.object({
   strategyHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
   maker: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   chainId: z.coerce.number().int().positive().default(8453).optional(),
-  mode: z.enum(["conservative", "aggressive"]).default("conservative"),
+  mode: z.enum(["stable", "aggressive"]).default("stable"),
   capitalToken: z
     .string()
     .regex(/^0x[a-fA-F0-9]{40}$/)
@@ -44,7 +44,7 @@ export async function GET(req: Request) {
   const rows = await prisma.managedStrategy.findMany({
     where: {
       ...(maker ? { maker: maker.toLowerCase() } : {}),
-      ...(mode === "aggressive" || mode === "conservative" ? { mode } : {}),
+      ...(mode === "aggressive" || mode === "stable" ? { mode } : {}),
     },
     orderBy: { updatedAt: "desc" },
     take: 100,
