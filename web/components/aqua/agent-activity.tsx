@@ -53,7 +53,21 @@ export function AgentActivity({ maker }: { maker?: string | null }) {
                 {d.action}
               </span>
               <div className="min-w-0 flex-1">
-                <div className="text-xs font-medium truncate">{d.pair}</div>
+                <div className="text-xs font-medium truncate">
+                  {d.pair}{" "}
+                  {d.txHash && (
+                    <a
+                      href={`https://basescan.org/tx/${d.txHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={d.txHash}
+                      className="ml-1 font-mono font-normal text-muted-foreground/70 underline decoration-dotted underline-offset-2 hover:text-foreground"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {d.txHash.slice(0, 10)}…
+                    </a>
+                  )}
+                </div>
                 <div className="text-[11px] text-muted-foreground truncate">
                   {d.reason}
                 </div>

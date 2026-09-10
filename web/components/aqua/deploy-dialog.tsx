@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useForm, Controller, FormProvider, useWatch } from "react-hook-form";
+import { useForm, Controller, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAccount, usePublicClient, useSignMessage } from "wagmi";
 import { base } from "wagmi/chains";
@@ -49,6 +49,10 @@ export function DeployDialog({
     sortBy: "volume",
   });
   const { positions } = useMyAquaPositions();
+  const isLocal =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1");
 
   const [tokens, setTokens] = useState<TokenOpt[]>([]);
   const [balances, setBalances] = useState<Map<string, string>>(new Map());
@@ -66,7 +70,7 @@ export function DeployDialog({
       capitalAmount: "",
       templates: [],
       manualPairs: [],
-      aggressive: false,
+      forceOor: false,
     },
   });
 
@@ -203,8 +207,6 @@ export function DeployDialog({
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [liveSteps, submitError, busy]);
 
-  const aggressive = useWatch({ control: form.control, name: "aggressive" });
-
   const onSubmit = async (v: FormValues) => {
     if (!address) {
       setSubmitError("Connect wallet first.");
@@ -236,7 +238,8 @@ export function DeployDialog({
     setSubmitError(null);
     setTxHashes([]);
     setLiveSteps({});
-    const deployMode = v.aggressive ? "aggressive" : "stable";
+    const deployMode = "aggressive";
+    const forceOor = isLocal && v.forceOor === true;
     const nonce = String(Date.now());
     const expiry = String(Date.now() + 5 * 60 * 1000);
     let signature: string;
@@ -267,6 +270,7 @@ export function DeployDialog({
           capitalAmount: v.capitalAmount,
           pairs,
           mode: deployMode,
+          forceOor,
           signature,
           nonce,
           expiry,
@@ -369,41 +373,43 @@ export function DeployDialog({
               <TemplateSection tops={tops ?? []} />
               <ManualPairsSection tokens={sortedTokens} />
 
-              <section className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2.5">
-                <div>
-                  <div className="text-sm font-medium">
-                    {aggressive ? "Aggressive mode" : "Stable mode"}
+              <div
+                role="note"
+                className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs font-medium text-warning-foreground"
+              >
+                Every position is agent-managed and may be rotated into top strategies at any time.
+                Don&apos;t delegate if you want to manage positions yourself.
+              </div>
+              {isLocal && (
+                <section className="flex items-center justify-between rounded-lg border border-dashed border-warning/50 px-3 py-2.5">
+                  <div>
+                    <div className="text-sm font-medium">Deploy out-of-range</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Local demo only. Pushes the range off-spot so the position opens OOR.
+                    </div>
                   </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    {aggressive
-                      ? "AI may rotate these into top strategies at any time."
-                      : "Sticks here. No rotation, fees compound in place."}
-                  </div>
-                </div>
-                <Controller
-                  name="aggressive"
-                  control={form.control}
-                  render={({ field }) => (
-                    <ToggleGroup
-                      type="single"
-                      value={field.value ? "aggressive" : "stable"}
-                      onValueChange={(val) => {
-                        if (val) field.onChange(val === "aggressive");
-                      }}
-                    >
-                      <ToggleGroupItem value="stable" aria-label="Stable mode">
-                        Stable
-                      </ToggleGroupItem>
-                      <ToggleGroupItem
-                        value="aggressive"
-                        aria-label="Aggressive mode"
+                  <Controller
+                    name="forceOor"
+                    control={form.control}
+                    render={({ field }) => (
+                      <ToggleGroup
+                        type="single"
+                        value={field.value ? "on" : "off"}
+                        onValueChange={(val) => {
+                          if (val) field.onChange(val === "on");
+                        }}
                       >
-                        Aggressive
-                      </ToggleGroupItem>
-                    </ToggleGroup>
-                  )}
-                />
-              </section>
+                        <ToggleGroupItem value="off" aria-label="Normal range">
+                          Off
+                        </ToggleGroupItem>
+                        <ToggleGroupItem value="on" aria-label="Force OOR">
+                          OOR
+                        </ToggleGroupItem>
+                      </ToggleGroup>
+                    )}
+                  />
+                </section>
+              )}
             </fieldset>
 
             <div className="space-y-2 mt-2">

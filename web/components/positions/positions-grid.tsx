@@ -57,11 +57,14 @@ export function PositionsGrid() {
   const [message, setMessage] = useState("");
   const [delegateOpen, setDelegateOpen] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
-  const [modeMap, setModeMap] = useState<Record<string, string>>({});
   const [rangeMap, setRangeMap] = useState<
     Record<string, { min: string; max: string }>
   >({});
+  const [ageMap, setAgeMap] = useState<Record<string, string>>({});
   const [allowMap, setAllowMap] = useState<Record<string, string>>({});
+  const [signalMap, setSignalMap] = useState<
+    Record<string, { eligible: boolean; headline: string; reasons: string[]; verdict: string }>
+  >({});
   const isDelegated = delegationStatus === "delegated";
 
   const publicClient = usePublicClient({ chainId: base.id });
@@ -75,17 +78,17 @@ export function PositionsGrid() {
     return fetch(`/api/strategies?maker=${effectiveMaker}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((rows) => {
-        const m: Record<string, string> = {};
         const r: Record<string, { min: string; max: string }> = {};
+        const a: Record<string, string> = {};
         for (const row of rows ?? []) {
           if (!row?.strategyHash) continue;
           const key = String(row.strategyHash).toLowerCase();
-          m[key] = row.mode;
           if (row.priceMin && row.priceMax)
             r[key] = { min: row.priceMin, max: row.priceMax };
+          if (row.createdAt) a[key] = String(row.createdAt);
         }
-        setModeMap(m);
         setRangeMap(r);
+        setAgeMap(a);
       })
       .catch(() => {});
   }, [effectiveMaker]);
@@ -93,6 +96,34 @@ export function PositionsGrid() {
   useEffect(() => {
     fetchModes();
   }, [fetchModes]);
+
+  const fetchSignals = useCallback(() => {
+    if (!effectiveMaker) return Promise.resolve();
+    return fetch(`/api/rotation/signal?maker=${effectiveMaker}`)
+      .then((r) => (r.ok ? r.json() : { signals: [] }))
+      .then((j) => {
+        const m: Record<string, { eligible: boolean; headline: string; reasons: string[]; verdict: string }> = {};
+        for (const s of j?.signals ?? []) {
+          if (!s?.strategyHash) continue;
+          m[String(s.strategyHash).toLowerCase()] = {
+            eligible: s.eligible === true,
+            headline: String(s.headline ?? ""),
+            reasons: Array.isArray(s.reasons) ? s.reasons.map(String) : [],
+            verdict: String(s.verdict ?? ""),
+          };
+        }
+        setSignalMap(m);
+      })
+      .catch(() => {});
+  }, [effectiveMaker]);
+
+  // Re-resolve signals whenever the position list itself changes (deploy,
+  // close, refresh). Depending only on onDone wiring left fresh positions
+  // without a verdict until a manual reload.
+  const positionCount = positions.length;
+  useEffect(() => {
+    fetchSignals();
+  }, [fetchSignals, positionCount]);
 
   useEffect(() => {
     if (!effectiveMaker || !publicClient || positions.length === 0) return;
@@ -431,9 +462,13 @@ export function PositionsGrid() {
                   <AquaPositionCard
                     key={slot.position.strategyHash + idx}
                     position={slot.position}
-                    mode={modeMap[hashKey] ?? null}
                     rangeLabel={rangeLabel}
-                    onClosed={() => refresh()}
+                    signal={signalMap[hashKey] ?? null}
+                    deployedAt={ageMap[hashKey] ?? null}
+                    onClosed={() => {
+                      refresh();
+                      fetchSignals();
+                    }}
                   />
                 );
               }
@@ -457,6 +492,7 @@ export function PositionsGrid() {
         onDone={() => {
           refresh();
           fetchModes();
+          fetchSignals();
         }}
       />
     </div>

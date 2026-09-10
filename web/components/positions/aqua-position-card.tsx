@@ -81,18 +81,38 @@ function earnedUsd(position: EnrichedAquaPosition): number | null {
   return typeof v === "number" && isFinite(v) ? v : null;
 }
 
+function formatAge(deployedAt: string | null | undefined): string | null {
+  if (!deployedAt) return null;
+  const t = new Date(deployedAt).getTime();
+  if (!Number.isFinite(t)) return null;
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m old`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h old`;
+  return `${Math.floor(hours / 24)}d old`;
+}
+
 export function AquaPositionCard({
   position,
-  mode,
   rangeLabel,
+  signal,
+  deployedAt,
   onClosed,
 }: {
   position: EnrichedAquaPosition;
-  mode?: string | null;
   rangeLabel?: string | null;
+  signal?: { eligible: boolean; headline: string; reasons: string[]; verdict: string } | null;
+  deployedAt?: string | null;
   onClosed?: () => void;
 }) {
-  const oor = position.isOutOfRange;
+  // Balance-based isOutOfRange misses price OOR (both sides funded but
+  // outside the band). The signal verdict probes quotes onchain instead.
+  const signalOor =
+    signal?.verdict === "oor-suspect" ||
+    signal?.verdict === "depleted" ||
+    signal?.verdict === "side-depleted";
+  const oor = position.isOutOfRange || signalOor === true;
 
   const illiquid = (position as any).isIlliquid === true;
   const u0 = tokenUsd(position.tokens[0]);
@@ -143,6 +163,7 @@ export function AquaPositionCard({
 
   return (
     <StrategyCard
+      highlight={signal?.eligible === true}
       pair={getPairLabel(position)}
       tokens={[
         {
@@ -198,9 +219,26 @@ export function AquaPositionCard({
       extra={
         <div className="space-y-1.5">
           <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
-            {mode === "aggressive" && (
-              <Badge className="rounded-md bg-amber-500/15 text-amber-600 border-transparent px-2 py-0.5 text-[10px] font-medium">
-                Aggressive
+            {signal?.eligible === true ? (
+              <Badge
+                variant="destructive"
+                className="rounded-md px-2 py-0.5 text-[10px] font-semibold"
+                title={[signal.headline, ...signal.reasons].filter(Boolean).join(" — ")}
+              >
+                <span className="mr-1 inline-block size-1.5 rounded-full bg-current" aria-hidden="true" />
+                Rotate recommended
+              </Badge>
+            ) : (
+              signal?.verdict === "oor-suspect" ||
+              signal?.verdict === "depleted" ||
+              signal?.verdict === "side-depleted"
+            ) && (
+              <Badge
+                className="rounded-md bg-amber-500/15 text-amber-700 border-transparent px-2 py-0.5 text-[10px] font-medium"
+                title={[signal.headline, ...signal.reasons].filter(Boolean).join(" — ")}
+              >
+                <span className="mr-1 inline-block size-1.5 rounded-full bg-current" aria-hidden="true" />
+                Needs attention
               </Badge>
             )}
             {rangeLabel && (
@@ -209,6 +247,15 @@ export function AquaPositionCard({
                 className="rounded-md px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
               >
                 {rangeLabel}
+              </Badge>
+            )}
+            {formatAge(deployedAt) && (
+              <Badge
+                variant="outline"
+                className="rounded-md px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                title={deployedAt ?? undefined}
+              >
+                {formatAge(deployedAt)}
               </Badge>
             )}
           </div>

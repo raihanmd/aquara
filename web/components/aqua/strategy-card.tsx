@@ -28,6 +28,7 @@ interface StrategyCardProps {
   rank?: number | null;
   headerRight?: ReactNode;
   corner?: ReactNode;
+  highlight?: boolean;
   extra?: ReactNode;
   footer?: ReactNode;
 }
@@ -120,6 +121,7 @@ export function StrategyCard({
   rank,
   headerRight,
   corner,
+  highlight = false,
   extra,
   footer,
 }: StrategyCardProps) {
@@ -130,6 +132,7 @@ export function StrategyCard({
     <Card
       className={cn(
         "group relative flex flex-col gap-0 px-4 pt-3 pb-3 rounded-xl border border-border/50 bg-card w-full",
+        highlight && "border-destructive/60 bg-destructive/[0.04] ring-1 ring-destructive/25",
         "transition-all duration-200",
         "hover:border-border hover:bg-card/80 hover:-translate-y-0.5 hover:shadow-(--shadow-card)",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",

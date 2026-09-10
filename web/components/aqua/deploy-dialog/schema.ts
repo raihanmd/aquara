@@ -32,7 +32,7 @@ export const formSchema = z
       .refine((v) => v !== "" && Number(v) > 0, "Enter a positive amount"),
     templates: z.array(z.string()).default([]),
     manualPairs: z.array(manualPairSchema).default([]),
-    aggressive: z.boolean(),
+    forceOor: z.boolean().default(false),
   })
   .superRefine((v, ctx) => {
     if (v.templates.length === 0 && v.manualPairs.length === 0) {
