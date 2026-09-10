@@ -1,5 +1,0 @@
-*.env
-secrets.upload.yaml
-*/node_modules/
-*/**/.cre_build*
-*/**/*.wasm.*
