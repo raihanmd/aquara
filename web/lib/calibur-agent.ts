@@ -162,57 +162,67 @@ export async function agentSignAndSubmit(
   const { account, walletClient, publicClient } = agentClients();
   const keyHash = computeKeyHash(account.address);
 
-  const seq = (await publicClient.readContract({
-    address: userEOA,
-    abi: GET_SEQ_ABI,
-    functionName: "getSeq",
-    args: [0n],
-  })) as bigint;
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
-
   const impl = parse7702Target(
     await publicClient.getCode({ address: userEOA })
   );
   if (!impl) throw new Error("User account is not a Calibur smart wallet");
   const domain = await readCaliburDomain(publicClient, userEOA, impl);
 
-  const message = {
-    batchedCall: { calls, revertOnFailure: true as const },
-    nonce: seq,
-    keyHash,
-    executor: account.address,
-    deadline,
+  const readSeq = () =>
+    publicClient.readContract({
+      address: userEOA,
+      abi: GET_SEQ_ABI,
+      functionName: "getSeq",
+      args: [0n],
+    }) as Promise<bigint>;
+
+  const signForSeq = async (seq: bigint) => {
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+    const message = {
+      batchedCall: { calls, revertOnFailure: true as const },
+      nonce: seq,
+      keyHash,
+      executor: account.address,
+      deadline,
+    };
+    const signature = await account.signTypedData({
+      domain: {
+        name: domain.name,
+        version: domain.version,
+        chainId: domain.chainId,
+        verifyingContract: userEOA,
+        salt: domain.salt,
+      },
+      types: TYPES as any,
+      primaryType: "SignedBatchedCall",
+      message: message as any,
+    });
+    const wrappedSignature = encodeAbiParameters(
+      [{ type: "bytes" }, { type: "bytes" }],
+      [signature, "0x"]
+    );
+    const calldata = encodeFunctionData({
+      abi: EXECUTE_ABI,
+      functionName: "execute",
+      args: [message as any, wrappedSignature],
+    });
+    return { seq, calldata };
   };
 
-  const signature = await account.signTypedData({
-    domain: {
-      name: domain.name,
-      version: domain.version,
-      chainId: domain.chainId,
-      verifyingContract: userEOA,
-      salt: domain.salt,
-    },
-    types: TYPES as any,
-    primaryType: "SignedBatchedCall",
-    message: message as any,
-  });
-
-  const wrappedSignature = encodeAbiParameters(
-    [{ type: "bytes" }, { type: "bytes" }],
-    [signature, "0x"]
-  );
-
-  const calldata = encodeFunctionData({
-    abi: EXECUTE_ABI,
-    functionName: "execute",
-    args: [message as any, wrappedSignature],
-  });
-
   // Serialize sends per relayer so concurrent jobs never share a nonce read.
+  // The Calibur seq is re-read and re-signed on every attempt: RPC read lag
+  // can hand us a stale seq right after our own previous tx mined, which the
+  // chain rejects as a replay.
   return enqueueSubmit(account.address.toLowerCase(), async () => {
     let lastErr: unknown = null;
+    let seq = await readSeq();
+    let calldata = (await signForSeq(seq)).calldata;
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) await sleep(2000 * attempt);
+      if (attempt > 0) {
+        await sleep(2000 * attempt);
+        seq = await readSeq();
+        calldata = (await signForSeq(seq)).calldata;
+      }
       const pending = BigInt(
         await publicClient.getTransactionCount({
           address: account.address,
@@ -258,11 +268,19 @@ export async function agentSignAndSubmit(
         return { txHash, nonce: seq };
       } catch (e) {
         lastErr = e;
-        if (!isNonceError(e)) throw e;
-        // Nonce collision: refresh on next attempt. Never resubmit blindly
-        // after a receipt timeout that may have mined (seq would have moved).
         const errText = `${(e as { message?: string })?.message ?? e}`;
         if (errText.toLowerCase().includes("timeout")) throw e;
+        if (isNonceError(e)) continue;
+        if (errText.includes("Batch reverted on-chain")) {
+          // Mined but reverted: either a genuine inner-call failure or a
+          // stale Calibur seq (replay). Re-read seq: moved means our read
+          // lagged behind our own previous tx, so retry re-signed. Unmoved
+          // means the calls themselves fail, retrying is pointless.
+          const fresh = await readSeq().catch(() => null);
+          if (fresh === null || fresh === seq) throw e;
+          continue;
+        }
+        throw e;
       }
     }
     throw lastErr instanceof Error

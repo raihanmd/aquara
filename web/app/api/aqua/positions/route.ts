@@ -1,4 +1,4 @@
-import { AQUA_BASE, aquaHeaders, getApiKey } from "@/lib/aqua-api";
+import { fetchMakerPositions, getApiKey } from "@/lib/aqua-api";
 
 export const dynamic = "force-dynamic";
 
@@ -11,17 +11,13 @@ export async function GET(req: Request) {
   const chainIds = searchParams.getAll("chainIds").map(Number).filter(Boolean);
   const limit = Math.min(Number(searchParams.get("limit") ?? 20) || 20, 50);
 
-  const params = new URLSearchParams({ limit: String(limit) });
-  (chainIds.length > 0 ? chainIds : [8453]).forEach((id) =>
-    params.append("chainIds", String(id)),
-  );
-  const res = await fetch(`${AQUA_BASE}/strategies/makers/${maker}?${params}`, {
-    headers: aquaHeaders(getApiKey()),
-  });
-  if (!res.ok) {
-    return Response.json({ error: `Aqua API ${res.status}` }, { status: 502 });
+  try {
+    const items = await fetchMakerPositions(maker, getApiKey(), limit, chainIds);
+    return Response.json({ items });
+  } catch (e) {
+    return Response.json(
+      { error: `Aqua API unavailable: ${String((e as Error)?.message ?? e).slice(0, 120)}` },
+      { status: 502 },
+    );
   }
-  const json = await res.json();
-  const items = Array.isArray(json) ? json : (json.items ?? []);
-  return Response.json({ items });
 }
