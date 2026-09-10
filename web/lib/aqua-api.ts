@@ -73,6 +73,43 @@ export function getApiKey(): string {
   return key;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Live positions for a maker with retries. The 1inch API flakes with
+ * transient 502/503/429s; a single attempt turns the whole signal/rotator
+ * run empty, so retry with backoff before giving up.
+ */
+export async function fetchMakerPositions(
+  maker: string,
+  apiKey: string,
+  limit = 50,
+  chainIds: number[] = [8453],
+): Promise<unknown[]> {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  (chainIds.length > 0 ? chainIds : [8453]).forEach((id) =>
+    qs.append("chainIds", String(id)),
+  );
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await sleep(1500 * attempt);
+    try {
+      const res = await fetch(`${AQUA_BASE}/strategies/makers/${maker}?${qs}`, {
+        headers: aquaHeaders(apiKey),
+      });
+      if (res.status === 502 || res.status === 503 || res.status === 429) continue;
+      if (!res.ok) throw new Error(`Aqua API ${res.status}`);
+      const json = await res.json();
+      const items = Array.isArray(json) ? json : (json.items ?? []);
+      if (Array.isArray(items)) return items;
+      throw new Error("bad positions shape");
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("positions fetch failed");
+}
+
 export async function fetchTopPositions(
   chainIds: number[],
   limit: number,

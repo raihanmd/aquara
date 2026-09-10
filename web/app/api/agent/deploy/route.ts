@@ -14,7 +14,6 @@ import { prisma } from "@/lib/prisma";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
 import { AQUA_BASE, aquaHeaders } from "@/lib/aqua-api";
 import { verifyDeployIntent } from "@/lib/deploy-auth";
-import { requireCre } from "@/lib/cre-auth";
 import { agentSignAndSubmit, type CaliburCall } from "@/lib/calibur-agent";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +28,11 @@ const bodySchema = z.object({
     .array(z.object({ tokenA: ADDR, tokenB: ADDR }))
     .min(1)
     .max(5),
-  mode: z.enum(["stable", "aggressive"]).default("stable"),
+  symbols: z.tuple([z.string().min(1).max(12), z.string().min(1).max(12)]).optional(),
+  mode: z.literal("aggressive").default("aggressive"),
+  // Demo-only: shift the range fully above spot so the position opens OOR.
+  // Server-enforced dev-only (ignored in production).
+  forceOor: z.boolean().optional().default(false),
   slippage: z.coerce.number().min(0.05).max(10).optional(),
   signature: z.string().regex(/^0x[a-fA-F0-9]+$/),
   nonce: z.string().min(1),
@@ -111,6 +114,21 @@ async function usdPrices(
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function tokenSymbols(apiKey: string): Promise<Map<string, string>> {
+  const m = new Map<string, string>();
+  try {
+    const res = await fetch("https://api.1inch.com/token/v1.2/8453", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) return m;
+    const json = (await res.json()) as Record<string, { address?: string; symbol?: string }>;
+    for (const t of Object.values(json)) {
+      if (t?.address && t?.symbol) m.set(String(t.address).toLowerCase(), String(t.symbol));
+    }
+  } catch {}
+  return m;
+}
 
 const devLog = (...a: any[]) => {
   if (process.env.NODE_ENV !== "production") console.log("[deploy]", ...a);
@@ -220,6 +238,7 @@ async function quoteOut(
 
 async function runDeployPipeline(
   parsed: z.infer<typeof bodySchema>,
+  opts?: { reasonTag?: string },
 ) {
   const { maker, capital, capitalAmount, pairs, mode } = parsed;
   const settingsRow = await (prisma as unknown as { makerSettings: { findUnique: (args: unknown) => Promise<{ slippage?: number } | null> } }).makerSettings.findUnique({
@@ -231,6 +250,7 @@ async function runDeployPipeline(
     process.env.ONEINCH_API_KEY || process.env.NEXT_PUBLIC_1INCH_API_KEY;
   if (!apiKey)
     return Response.json({ error: "ONEINCH_API_KEY missing" }, { status: 500 });
+  const symbols = await tokenSymbols(apiKey);
 
   // One deploy pipeline per maker at a time. Concurrent runs share the single
   // relayer EOA and collide on its transaction nonce even with per-relayer
@@ -326,6 +346,7 @@ async function runDeployPipeline(
           strategyHash: string;
           range: { min: string; max: string } | null;
           capSpent: bigint;
+          demoOor: boolean;
         }
 
         await pushStep({
@@ -344,7 +365,7 @@ async function runDeployPipeline(
             ]),
           ]),
         ];
-        const [inv, allocMap, prices] = await Promise.all([
+        const [inv, allocMap, prices, aquaRates] = await Promise.all([
           publicClient.multicall({
             contracts: [
               ...allToks.map((t) => ({
@@ -384,6 +405,33 @@ async function runDeployPipeline(
             return m;
           })(),
           usdPrices(allToks, apiKey),
+          (async () => {
+            // Fallback USD rates from Aqua's own balance data (raw + usd per
+            // token). Covers obscure tokens the 1inch price API doesn't know.
+            const rates = new Map<string, number>();
+            try {
+              const aq = await fetch(
+                `${AQUA_BASE}/strategies/makers/${maker}?limit=50&chainIds=8453`,
+                { headers: aquaHeaders(apiKey) },
+              );
+              if (aq.ok) {
+                const aj = await aq.json() as { items?: Array<{ tokens?: Array<{ address?: string; currentBalance?: { raw?: string; usd?: number | null } }> }> };
+                for (const s of aj.items ?? []) {
+                  for (const t of s.tokens ?? []) {
+                    const a = String(t?.address ?? "").toLowerCase();
+                    const r = t?.currentBalance?.raw;
+                    const u = t?.currentBalance?.usd;
+                    if (!a || r === undefined || r === null || typeof u !== "number" || !(u > 0)) continue;
+                    try {
+                      const raw = BigInt(String(r));
+                      if (raw > 0n && !rates.has(a)) rates.set(a, u / Number(raw));
+                    } catch {}
+                  }
+                }
+              }
+            } catch {}
+            return rates;
+          })(),
         ]);
         const decMap = new Map<string, number>();
         const walletMap = new Map<string, bigint>();
@@ -404,6 +452,13 @@ async function runDeployPipeline(
             return [t, u > 0n ? u : 0n] as [string, bigint];
           }),
         );
+        // aquaRates are per-raw-unit; scale to per-token with onchain decimals.
+        for (const [t, rate] of aquaRates) {
+          if ((prices.get(t) ?? null) !== null || !(rate > 0)) continue;
+          const dec = decMap.get(t);
+          if (dec === undefined) continue;
+          prices.set(t, rate * 10 ** dec);
+        }
         const capPrice = prices.get(capLow) ?? null;
         if (!capPrice)
           throw new Error(
@@ -486,7 +541,13 @@ async function runDeployPipeline(
           const bLow = pair.tokenB.toLowerCase();
           const decA = decMap.get(aLow) ?? 18;
           const decB = decMap.get(bLow) ?? 18;
-          const label = `${pair.tokenA.slice(0, 6)}…/${pair.tokenB.slice(0, 6)}…`;
+          const symOf = (a: string, fallback?: string) =>
+            symbols.get(a.toLowerCase()) ?? fallback ?? `${a.slice(0, 6)}…`;
+          const given = parsed.symbols;
+          const label =
+            given && pairs.length === 1
+              ? `${given[0]}/${given[1]}`
+              : `${symOf(pair.tokenA)}/${symOf(pair.tokenB)}`;
           let needA = toRaw(perPairUsd / 2, aLow);
           let needB = toRaw(perPairUsd / 2, bLow);
           if (needA === 0n && needB === 0n)
@@ -552,6 +613,7 @@ async function runDeployPipeline(
           });
 
           let range: { min: string; max: string } | null = null;
+          let demoOor = false;
           {
             const pA = prices.get(aLow) as number;
             const pB = prices.get(bLow) as number;
@@ -565,11 +627,16 @@ async function runDeployPipeline(
             );
             if (r) {
               range = { min: r.min.toString(), max: r.max.toString() };
+              if (process.env.NODE_ENV !== "production" && parsed.forceOor === true) {
+                range = { min: (r.max * 2n).toString(), max: (r.max * 3n).toString() };
+                demoOor = true;
+              }
               devLog(`pair ${i} range`, {
                 min: range.min,
                 max: range.max,
                 pA,
                 pB,
+                demoOor: range.min !== r.min.toString(),
               });
             }
           }
@@ -625,6 +692,7 @@ async function runDeployPipeline(
             strategyHash,
             range,
             capSpent,
+            demoOor,
           });
         }
 
@@ -859,7 +927,9 @@ async function runDeployPipeline(
               await pushStep({
                 pair: i,
                 stage: "ranged",
-                detail: "concentrated +-10% around spot",
+                detail: plan.demoOor
+                  ? "demo range pushed off-spot (intentionally OOR)"
+                  : "concentrated +-10% around spot",
               });
             }
             const shipCall = (plan as unknown as { shipCall: CaliburCall }).shipCall;
@@ -929,7 +999,7 @@ async function runDeployPipeline(
                     strategyHash: plan.strategyHash,
                     pair: plan.label,
                     action: "ship",
-                    reason: `agent deployed (${mode})`,
+                    reason: opts?.reasonTag ? `${opts.reasonTag} (${mode})` : `agent deployed (${mode})`,
                     txHash,
                   },
                 });
@@ -984,112 +1054,39 @@ async function runDeployPipeline(
 export async function POST(req: Request) {
   const rawBody = await req.json().catch(() => ({}));
 
-  // CRE auth branch: check x-api-key FIRST via requireCre
-  // secrets.yaml maps secret ID (CRE_API_KEY, used via getSecret({id})) to ENV VAR NAME (CRE_API_KEY_VAR,
-  // resolved from .env locally / Vault DON when deployed). See cre/aquara-watch/secrets.yaml
-  const creCheck = requireCre(req);
-  if (creCheck === null) {
-    // Valid CRE x-api-key -> CRE flow (global key, accepted risk: not per-maker)
-    const makerRaw = (rawBody as Record<string, unknown>).maker;
-    const modeRaw = (rawBody as Record<string, unknown>).mode;
-    const strategyHashRaw = (rawBody as Record<string, unknown>).strategyHash;
-    const pairRaw = (rawBody as Record<string, unknown>).pair;
-
-    if (
-      typeof makerRaw !== "string" ||
-      !/^0x[a-fA-F0-9]{40}$/.test(makerRaw)
-    ) {
-      return Response.json({ error: "maker required" }, { status: 403 });
-    }
-    if (modeRaw !== "aggressive") {
-      return Response.json({ error: "mode must be aggressive" }, { status: 403 });
-    }
-    if (
-      typeof strategyHashRaw !== "string" ||
-      !/^0x[a-fA-F0-9]{64}$/.test(strategyHashRaw)
-    ) {
-      return Response.json({ error: "strategyHash required" }, { status: 403 });
-    }
-    if (typeof pairRaw !== "string" || pairRaw.length === 0) {
-      return Response.json({ error: "pair required" }, { status: 403 });
-    }
-
-    const makerLow = makerRaw.toLowerCase();
-    const [managedUser, managedStrategy] = await Promise.all([
-      (prisma as unknown as { managedUser: { findUnique: (args: unknown) => Promise<unknown> } }).managedUser.findUnique({
-        where: { address: makerLow },
-      }),
-      prisma.managedStrategy.findFirst({ where: { maker: makerLow } }),
-    ]);
-    if (!managedUser && !managedStrategy) {
-      return Response.json({ error: "maker not managed" }, { status: 403 });
-    }
-
-    // Log CRE-initiated deploys distinctly (server-side caps not required, CRE enforces)
-    console.log(
-      `[deploy][CRE] maker=${makerLow} strategyHash=${(strategyHashRaw as string).slice(0, 10)} pair=${pairRaw} mode=${modeRaw} reason=${String((rawBody as Record<string, unknown>).reason ?? "").slice(0, 120)}`,
-    );
-
-    // Minimal CRE body (maker, strategyHash, pair, mode, reason) -> create job and return
-    // If CRE also sends capital/pairs, fall through to full deploy pipeline below without wallet-sig
-    const hasCapitalDeploy =
-      typeof (rawBody as Record<string, unknown>).capital === "string" &&
-      typeof (rawBody as Record<string, unknown>).capitalAmount === "string" &&
-      Array.isArray((rawBody as Record<string, unknown>).pairs);
-
-    if (!hasCapitalDeploy) {
-      const job = await prisma.agentJob.create({
-        data: {
-          maker: makerLow,
-          chainId: 8453,
-          kind: "deploy",
-          status: "running",
-          steps: [
-            {
-              stage: "cre-triggered",
-              detail: `CRE rotation for ${pairRaw} ${(strategyHashRaw as string).slice(0, 10)}`,
-              reason: String((rawBody as Record<string, unknown>).reason ?? ""),
-            },
-          ],
-        },
-      });
-      await prisma.agentJob.update({
-        where: { id: job.id },
-        data: {
-          status: "done",
-          steps: [
-            {
-              stage: "cre-triggered",
-              detail: `CRE rotation for ${pairRaw}`,
-              reason: String((rawBody as Record<string, unknown>).reason ?? ""),
-            },
-          ],
-        },
-      });
-      return Response.json({
-        ok: true,
-        jobId: job.id,
-        cre: true,
-        maker: makerLow,
-        strategyHash: strategyHashRaw,
-        pair: pairRaw,
-      });
-    }
-
-    const parsedCapital = bodySchema.safeParse(rawBody);
-    if (!parsedCapital.success) {
+  // Internal cron path: the rotator service redeploys docked capital for
+  // delegated makers. No wallet signature exists here, so the service key
+  // replaces it. Maker must be delegated and mode must be aggressive.
+  const cronKey = process.env.CRON_API_KEY;
+  if (cronKey && req.headers.get("x-cron-key") === cronKey) {
+    const cronSchema = bodySchema.omit({ signature: true, nonce: true, expiry: true });
+    const cronParsed = cronSchema.safeParse(rawBody);
+    if (!cronParsed.success) {
       return Response.json(
         { error: "maker, capital, capitalAmount, pairs[] required" },
         { status: 400 },
       );
     }
-    return runDeployPipeline(parsedCapital.data);
-  } else if (creCheck && (creCheck as Response).status === 500) {
-    // Fail-closed when CRE_API_KEY env missing
-    return creCheck;
+
+    const managed = await prisma.managedUser.findUnique({
+      where: { address: cronParsed.data.maker.toLowerCase() },
+    });
+    if (!managed) {
+      return Response.json({ error: "maker not delegated" }, { status: 403 });
+    }
+    console.log(`[deploy][cron] maker=${cronParsed.data.maker.toLowerCase()} pairs=${cronParsed.data.pairs.length}`);
+    return runDeployPipeline(
+      {
+        ...cronParsed.data,
+        signature: "0x",
+        nonce: String(Date.now()),
+        expiry: String(Date.now() + 300000),
+      },
+      { reasonTag: "cron rotation" },
+    );
   }
 
-  // Wallet-sig path (dashboard flow, untouched, byte-identical behavior)
+  // Wallet-sig path: every dashboard deploy requires the maker's intent signature.
   const parsed = bodySchema.safeParse(rawBody);
   if (!parsed.success) {
     return Response.json(
