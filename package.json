@@ -5,11 +5,14 @@
   "description": "Aquara monorepo - AI liquidity manager for 1inch Aqua on Base",
   "workspaces": [
     "web",
-    "taker-bot"
+    "taker-bot",
+    "rotator"
   ],
   "scripts": {
     "dev:web": "bun --cwd web dev",
     "build:web": "bun --cwd web build",
-    "start:bot": "bun --cwd taker-bot start"
+    "start:bot": "bun --cwd taker-bot start",
+    "dev:rotator": "bun --cwd rotator dev",
+    "start:rotator": "bun --cwd rotator start"
   }
 }

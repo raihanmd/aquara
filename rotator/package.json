@@ -1,0 +1,16 @@
+{
+  "name": "rotator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bun cron engine that rotates underperforming aggressive Aqua positions: evaluate, dock, redeploy",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@1inch/aqua-sdk": "^0.3.1",
+    "hono": "^4.13.7",
+    "viem": "^2.33.0"
+  }
+}
