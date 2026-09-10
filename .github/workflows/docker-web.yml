@@ -5,7 +5,7 @@
 #     NEXT_PUBLIC_AGENT_ADDRESS=0x5235401AbA9b0f597A19B48497bf174a4dA8A090
 #
 # Server-only runtime envs (NOT baked into image, set on VPS via --env-file .env):
-#   DATABASE_URL, ONEINCH_API_KEY, RELAYER_PRIVATE_KEY, CRE_API_KEY, AI_API_RPC, AI_API_KEY, AI_MODEL
+#   DATABASE_URL, ONEINCH_API_KEY, RELAYER_PRIVATE_KEY
 # VPS run example:
 #   docker run -p 3000:3000 --env-file .env ghcr.io/<owner>/aquara-web:latest
 # Tag release: `git tag v1.2.3 && git push origin v1.2.3` produces `ghcr.io/<owner>/aquara-web:1.2.3`.

@@ -1,24 +1,14 @@
-# Aquara — AI Liquidity Manager for 1inch Aqua
+# Aquara — Delegate once, stay in range on 1inch Aqua
 
-Small capital earns nothing on-chain: aggregators route around it, and manual
-range management is a full-time job. **Aquara turns any wallet into a managed
-liquidity position**: delegate once to a scoped agent key, deploy capital into
-1inch Aqua strategies in one click, and let automation keep the capital productive.
+**Delegate once: Aquara turns any Base wallet into a self-managing 1inch Aqua position that stays in range without custody.**
 
-Live on **Base mainnet** (chain 8453), built on **1inch Aqua** + **Chainlink CRE** + **Calibur**
-(EIP-7702 smart wallets).
+Live on **Base mainnet** (chain 8453), built on **1inch Aqua** + **Calibur** (EIP-7702 smart wallets).
 
-## 3-minute demo
+## 90-second demo
 
-1. **Connect + Delegate** — open the dashboard, click _Delegate to agent_,
-   sign once. Your EOA first need to becomes a Calibur smart wallet, then let delegated to our agent, the agent key may only
-   touch an explicit whitelist (Aqua ship/dock, token approvals, 1inch router).
-   Revoke anytime, key auto-expires in 30 days.
-2. **Deploy** — pick a pair (e.g. USDC/WETH), choose Stable or Aggressive,
-   Deploy. Watch live progress: planning → swaps → ship → on-chain position.
-
-(DEV AND DEMO ONLY) Run the taker bot once: it fills your own position, volume
-and taker fees accrue on the card within minutes.
+1. **Connect + Delegate** — open the dashboard, click _Delegate to agent_, sign once. Your EOA becomes a Calibur smart wallet and authorizes our agent key for 30 days. The key can only touch an explicit whitelist (Aqua ship/dock, token approvals, 1inch router). Revoke anytime.
+2. **Deploy** — pick a pair (e.g. USDC/WETH), choose Stable or Aggressive, Deploy. Watch live progress: planning → swaps → ship → on-chain position.
+3. **Earn** — (demo only) run the taker bot once: it fills your own position, volume and taker fees accrue on the card within minutes.
 
 ## How it fits together
 
@@ -28,6 +18,7 @@ wallet (Calibur 7702) ── scoped key ──▶ agent relayer ──▶ Aqua (
 
 - No custody: tokens never leave your wallet (Aqua allowance model).
 - Every number on screen traces to chain or the 1inch API.
+- A Bun cron engine (taker-bot) keeps demo volume flowing on a schedule; positions stay manageable from the dashboard.
 
 ## Repo map
 
@@ -35,17 +26,16 @@ wallet (Calibur 7702) ── scoped key ──▶ agent relayer ──▶ Aqua (
 | ------------ | ---------------------------------------------------------------------------- |
 | `web/`       | Next.js dashboard + API (positions, deploy pipeline, delegation, decisions history) |
 | `taker-bot/` | Autonomous taker service filling our own strategies (demo volume engine)     |
-| `cre/`       | Chainlink CRE auto-manage (owns ticking via watch workflow)                  |
 
 ## Run it
 
 ```bash
+git clone <repo-url> aquara && cd aquara
 bun install
 cp web/.env.example web/.env         # 1inch key + RPC + relayer key (server-only)
 cp taker-bot/.env.example taker-bot/.env
-
-# Fill guide also in .env.example
-
+docker compose -f web/docker-compose.yml up -d   # postgres
+bunx --cwd web prisma migrate deploy
 bun run dev:web                      # dashboard on :3000 (Base mainnet, real funds!)
 ```
 
