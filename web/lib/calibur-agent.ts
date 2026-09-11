@@ -12,6 +12,9 @@ import {
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { parse7702Target, readCaliburDomain } from "./delegation/actions";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 
 export interface CaliburCall {
   to: Address;
@@ -84,7 +87,11 @@ export function getAgentAccount(): { account: PrivateKeyAccount; address: Addres
 }
 
 function rpcUrl(): string {
-  return process.env.NEXT_PUBLIC_RPC_URL || "https://mainnet.base.org";
+  const u = process.env.NEXT_PUBLIC_RPC_URL;
+  if (!u) {
+    throw new Error("NEXT_PUBLIC_RPC_URL missing - set your Alchemy RPC URL in web/.env");
+  }
+  return u;
 }
 
 export function agentClients() {
@@ -125,6 +132,61 @@ const TYPES = {
 // backwards, plus one retry with refreshed nonce and bumped fees.
 const submitChains = new Map<string, Promise<unknown>>();
 const lastUsedNonces = new Map<string, bigint>();
+// File-backed nonce floor: web and rotator are separate processes (plus
+// --hot restarts wipe memory), so the floor must survive both. Same-machine
+// processes share tmpdir, making this a cross-process floor. Best-effort:
+// file IO never blocks a send.
+const NONCE_FLOOR_FILE = join(tmpdir(), "aquara-relayer-nonce.json");
+function fileFloor(addr: string): bigint {
+  try {
+    const j = JSON.parse(readFileSync(NONCE_FLOOR_FILE, "utf8")) as Record<string, unknown>;
+    const v = (j as Record<string, number>)[addr];
+    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? BigInt(v) + 1n : 0n;
+  } catch {
+    return 0n;
+  }
+}
+function saveFloor(addr: string, nonce: bigint): void {
+  try {
+    let j: Record<string, number> = {};
+    try {
+      j = JSON.parse(readFileSync(NONCE_FLOOR_FILE, "utf8")) as Record<string, number>;
+    } catch {}
+    j[addr] = Number(nonce);
+    writeFileSync(NONCE_FLOOR_FILE, JSON.stringify(j));
+  } catch {}
+}
+// Calibur seq floor: same RPC-lag disease as nonces. Right after our own tx
+// mines, reads can return the stale seq and the next batch replays -> mined
+// revert that looks like an inner-call failure. Floor never goes backwards.
+const lastUsedSeqs = new Map<string, bigint>();
+function seqFloorKey(maker: string): string {
+  return `seq:${maker.toLowerCase()}`;
+}
+function seqFloor(maker: string): bigint {
+  const key = seqFloorKey(maker);
+  const mem = (lastUsedSeqs.get(key) ?? -1n) + 1n;
+  try {
+    const j = JSON.parse(readFileSync(NONCE_FLOOR_FILE, "utf8")) as Record<string, number>;
+    const v = j[key];
+    const file = typeof v === "number" && Number.isInteger(v) && v >= 0 ? BigInt(v) + 1n : 0n;
+    return mem > file ? mem : file;
+  } catch {
+    return mem;
+  }
+}
+function saveSeqFloor(maker: string, seq: bigint): void {
+  const key = seqFloorKey(maker);
+  lastUsedSeqs.set(key, seq);
+  try {
+    let j: Record<string, number> = {};
+    try {
+      j = JSON.parse(readFileSync(NONCE_FLOOR_FILE, "utf8")) as Record<string, number>;
+    } catch {}
+    j[key] = Number(seq);
+    writeFileSync(NONCE_FLOOR_FILE, JSON.stringify(j));
+  } catch {}
+}
 
 function enqueueSubmit<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = submitChains.get(key) ?? Promise.resolve();
@@ -167,7 +229,9 @@ export async function prepareBatch(
 ): Promise<PreparedBatch & { account: PrivateKeyAccount }> {
   const { account, publicClient } = agentClients();
   const keyHash = computeKeyHash(account.address);
-  const seq = await readSeqOf(publicClient, userEOA);
+  const onchainSeq = await readSeqOf(publicClient, userEOA);
+  const floor = seqFloor(userEOA);
+  const seq = onchainSeq > floor ? onchainSeq : floor;
   const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
   const impl = parse7702Target(await publicClient.getCode({ address: userEOA }));
   if (!impl) throw new Error("User account is not a Calibur smart wallet");
@@ -225,8 +289,11 @@ export async function simulateBatch(
 ): Promise<string | null> {
   const { publicClient } = agentClients();
   try {
-    const { calldata } = await prepareBatch(userEOA, calls, 300);
-    await publicClient.call({ to: userEOA, data: calldata, value: 0n, account: userEOA });
+    const { calldata, account } = await prepareBatch(userEOA, calls, 300);
+    // from MUST be the relayer: the hook enforces tx.origin == executor, so
+    // simulating as the maker always reverts Unauthorized() even for valid
+    // batches. Real sends originate from the relayer - mirror that here.
+    await publicClient.call({ to: userEOA, data: calldata, value: 0n, account: account.address });
     return null;
   } catch (e: unknown) {
     const err = e as { shortMessage?: string; message?: string };
@@ -261,7 +328,9 @@ export async function agentSignAndSubmit(
           blockTag: "pending",
         }),
       );
-      const floor = (lastUsedNonces.get(account.address.toLowerCase()) ?? -1n) + 1n;
+      const addrKey = account.address.toLowerCase();
+      const memFloor = (lastUsedNonces.get(addrKey) ?? -1n) + 1n;
+      const floor = memFloor > fileFloor(addrKey) ? memFloor : fileFloor(addrKey);
       const nonce = pending > floor ? pending : floor;
       // Batch-aware gas: estimate per send (batches vary in size), floor at
         // single-call cost, fallback to per-call heuristic on failure.
@@ -325,17 +394,25 @@ export async function agentSignAndSubmit(
         }
         const txHash = await walletClient.sendTransaction(txParams);
         lastUsedNonces.set(account.address.toLowerCase(), nonce);
+        saveFloor(account.address.toLowerCase(), nonce);
         const receipt = await publicClient.waitForTransactionReceipt({
           hash: txHash,
           timeout: 120_000,
         });
         if (receipt.status !== "success")
           throw new Error("Batch reverted on-chain");
+        saveSeqFloor(userEOA, seq);
         return { txHash, nonce: seq };
       } catch (e) {
         lastErr = e;
         const errText = `${(e as { message?: string })?.message ?? e}`;
-        if (errText.toLowerCase().includes("timeout")) throw e;
+        // Receipt timeout usually means our tx was replaced under the same
+        // nonce by the sibling process (web vs rotator share one relayer).
+        // Retry re-reads pending + re-signs seq, i.e. a fresh nonce.
+        if (errText.toLowerCase().includes("timeout")) {
+          if (attempt < 2) continue;
+          throw e;
+        }
         if (isNonceError(e)) continue;
         if (errText.includes("Batch reverted on-chain")) {
           // Mined but reverted: either a genuine inner-call failure or a
