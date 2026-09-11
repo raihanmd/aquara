@@ -24,7 +24,6 @@ import {
   hookAbi,
   ANY_FN_SEL,
   ANY_TARGET,
-  CALIBUR_ADDRESS,
   GUARDED_EXECUTOR_HOOK,
   ONEINCH_V6_ROUTER,
 } from "./constants";

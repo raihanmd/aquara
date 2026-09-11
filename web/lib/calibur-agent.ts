@@ -7,7 +7,6 @@ import {
   encodeFunctionData,
   type Address,
   type Hex,
-  type Account,
 } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { base } from "viem/chains";

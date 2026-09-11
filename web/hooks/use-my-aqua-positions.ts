@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useAccount, useConnection } from "wagmi";
+import { useConnection } from "wagmi";
 
 export interface AquaToken {
   address: string;

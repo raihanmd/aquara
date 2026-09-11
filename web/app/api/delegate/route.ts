@@ -1,6 +1,5 @@
 import { z } from "zod";
 import {
-  isAddress,
   type Address,
   type Hex,
   createPublicClient,

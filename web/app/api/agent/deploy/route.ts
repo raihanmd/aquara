@@ -199,29 +199,6 @@ async function quoteSwap(
   return { to: q.to, data: q.data, value: q.value, out: q.dstAmount };
 }
 
-async function quoteOut(
-  src: string,
-  dst: string,
-  amount: bigint,
-  apiKey: string,
-): Promise<bigint | null> {
-  try {
-    const qs = new URLSearchParams({ src, dst, amount: amount.toString() });
-    const res = await fetch(
-      `https://api.1inch.com/swap/v6.1/8453/quote?${qs}`,
-      {
-        headers: { Authorization: `Bearer ${apiKey}` },
-      },
-    );
-    if (!res.ok) return null;
-    const json = await res.json();
-    const raw = json.toAmount ?? json.dstAmount ?? json.toTokenAmount ?? null;
-    return raw !== null && raw !== undefined ? BigInt(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
 async function runDeployPipeline(
   parsed: z.infer<typeof bodySchema>,
   opts?: { reasonTag?: string },
@@ -948,7 +925,6 @@ async function runDeployPipeline(
                   : "concentrated +-10% around spot",
               });
             }
-            const shipCall = (plan as unknown as { shipCall: CaliburCall }).shipCall;
             await pushStep({
               pair: i,
               stage: "shipping",

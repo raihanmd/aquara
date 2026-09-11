@@ -141,6 +141,7 @@ export function StrategyCard({
       role="article"
       aria-label={`${pair} strategy`}
     >
+      {corner}
       <div
         className={cn("flex items-center justify-between w-full gap-2 mb-2")}
       >

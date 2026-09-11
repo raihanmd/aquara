@@ -2,12 +2,9 @@
 
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { usePublicClient } from "wagmi";
-import { base } from "wagmi/chains";
-import type { Address } from "viem";
 import { useDelegation } from "@/hooks/use-delegation";
 import { useMyAquaPositions } from "@/hooks/use-my-aqua-positions";
-import { QUIRKY_MESSAGES, AQUA } from "@/lib/config";
+import { QUIRKY_MESSAGES } from "@/lib/config";
 import { TopPositions } from "@/components/aqua/top-positions";
 import { SharedCapital } from "@/components/aqua/shared-capital";
 import { AgentActivity } from "@/components/aqua/agent-activity";
@@ -61,13 +58,11 @@ export function PositionsGrid() {
     Record<string, { min: string; max: string }>
   >({});
   const [ageMap, setAgeMap] = useState<Record<string, string>>({});
-  const [allowMap, setAllowMap] = useState<Record<string, string>>({});
   const [signalMap, setSignalMap] = useState<
     Record<string, { eligible: boolean; headline: string; reasons: string[]; verdict: string }>
   >({});
   const isDelegated = delegationStatus === "delegated";
 
-  const publicClient = usePublicClient({ chainId: base.id });
 
   useEffect(() => {
     if (!delegateOpen) checkDelegation();
@@ -124,56 +119,6 @@ export function PositionsGrid() {
   useEffect(() => {
     fetchSignals();
   }, [fetchSignals, positionCount]);
-
-  useEffect(() => {
-    if (!effectiveMaker || !publicClient || positions.length === 0) return;
-    const toks = [
-      ...new Set(
-        positions
-          .flatMap((p) =>
-            ((p as any)?.tokens ?? []).map((t: any) =>
-              String(t?.address ?? "").toLowerCase(),
-            ),
-          )
-          .filter(Boolean),
-      ),
-    ];
-    if (toks.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = (await publicClient.multicall({
-          contracts: toks.map((t) => ({
-            address: t as Address,
-            abi: [
-              {
-                name: "allowance",
-                type: "function",
-                stateMutability: "view",
-                inputs: [
-                  { name: "owner", type: "address" },
-                  { name: "spender", type: "address" },
-                ],
-                outputs: [{ type: "uint256" }],
-              },
-            ] as const,
-            functionName: "allowance",
-            args: [effectiveMaker as Address, AQUA as Address],
-          })),
-        })) as any[];
-        if (cancelled) return;
-        const m: Record<string, string> = {};
-        res.forEach((r, k) => {
-          if (r?.status === "success")
-            m[toks[k]] = (r.result as bigint).toString();
-        });
-        setAllowMap(m);
-      } catch {}
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [effectiveMaker, publicClient, positions]);
 
   useEffect(() => {
     if (!isDelegated || !effectiveMaker) return;
@@ -389,29 +334,6 @@ export function PositionsGrid() {
                   slot.position.strategyHash ?? ""
                 ).toLowerCase();
                 const toks = (slot.position as any)?.tokens ?? [];
-                const rawOf = (t: any) => {
-                  try {
-                    return BigInt(
-                      String(
-                        t?.currentBalance?.raw ?? t?.walletBalance?.raw ?? "0",
-                      ),
-                    );
-                  } catch {
-                    return 0n;
-                  }
-                };
-                const allowOk = (t: any) => {
-                  const v = allowMap[String(t?.address ?? "").toLowerCase()];
-                  if (v === undefined) return null;
-                  try {
-                    return BigInt(v) > 0n;
-                  } catch {
-                    return null;
-                  }
-                };
-                const a0 = allowOk(toks[0]);
-                const a1 = allowOk(toks[1]);
-
                 const rg = rangeMap[hashKey];
                 let rangeLabel: string | null = null;
                 if (rg && toks.length >= 2) {
@@ -426,7 +348,6 @@ export function PositionsGrid() {
                     const decLo = hiIs0 ? d1 : d0;
                     const hHiPerLo = (v: string) =>
                       (Number(v) * 10 ** (decLo - decHi)) / 1e18;
-                    const symOf = (t: any) => t?.symbol ?? "";
                     const hiTok = toks[hiIs0 ? 0 : 1];
                     const loTok = toks[hiIs0 ? 1 : 0];
                     const isStable = (t: any) =>

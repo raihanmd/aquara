@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import {
-  useAccount,
   useChainId,
   useConnection,
   usePublicClient,
@@ -15,7 +14,6 @@ import { Loader2, ExternalLinkIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StrategyCard } from "@/components/aqua/strategy-card";
-import { cn } from "@/lib/utils";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
 import type { EnrichedAquaPosition } from "@/hooks/use-my-aqua-positions";
 import Link from "next/link";

@@ -12,7 +12,7 @@ export const ManualPairsSection = memo(function ManualPairsSection({
 }: {
   tokens: TokenOpt[];
 }) {
-  const { control, setValue, getValues } = useFormContext<FormValues>();
+  const { control, setValue } = useFormContext<FormValues>();
   const pairs = useWatch({ control, name: "manualPairs" }) ?? [];
   const [a, setA] = useState(USDC_BASE);
   const [b, setB] = useState(WETH_BASE);

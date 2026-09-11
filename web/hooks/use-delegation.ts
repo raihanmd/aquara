@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useAccount, useChainId, usePublicClient, useSwitchChain, useWalletClient } from "wagmi";
+import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import { base } from "wagmi/chains";
 import type { Address, Hex } from "viem";
 
@@ -48,8 +48,6 @@ export function useDelegation() {
   const { address } = useAccount();
   const publicClient = usePublicClient({ chainId: base.id });
   const { data: walletClient } = useWalletClient();
-  const chainId = useChainId();
-  const { switchChainAsync } = useSwitchChain();
 
   const [status, setStatus] = useState<DelegationStatus>("unknown");
   const [agentAddress, setAgentAddress] = useState<Address | null>(null);
@@ -324,7 +322,7 @@ export function useDelegation() {
   // 1. User signs EIP-712 typed data (no transaction, no self-call)
   // 2. Backend relayer calls execute(SignedBatchedCall, signature) on user's EOA
   const delegate = useCallback(
-    async (positionIds?: string[]): Promise<boolean> => {
+    async (_positionIds?: string[]): Promise<boolean> => {
       if (!address || !publicClient || !agentAddress) {
         setError("Wallet not connected or agent not loaded");
         return false;
