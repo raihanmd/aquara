@@ -296,13 +296,32 @@ export async function agentSignAndSubmit(
           chain: base,
           nonce: Number(nonce),
         };
-        if (attempt > 0) {
+        // Fee policy: estimate-based, scaled by RELAYER_GAS_MULT_BPS
+        // (default 100 = network rate, no overpay). Below 100 = slower and
+        // cheaper, but risks stuck txs; retries always bump above the first
+        // attempt so they never look like underpriced replacements.
+        const gasMultRaw = Number(process.env.RELAYER_GAS_MULT_BPS ?? 100);
+        const gasMult =
+          Number.isFinite(gasMultRaw) && gasMultRaw >= 50 && gasMultRaw <= 500
+            ? BigInt(Math.floor(gasMultRaw))
+            : 100n;
+        const fees = await publicClient.estimateFeesPerGas();
+        const baseMaxFee = (fees.maxFeePerGas * gasMult) / 100n;
+        const basePrioFee = (fees.maxPriorityFeePerGas * gasMult) / 100n;
+        if (attempt === 0) {
+          if (gasMult !== 100n) {
+            txParams.maxFeePerGas = baseMaxFee;
+            txParams.maxPriorityFeePerGas = basePrioFee;
+          }
+        } else {
           // Bump fees so a retry never looks like an underpriced replacement.
-          const fees = await publicClient.estimateFeesPerGas();
-          const mult = 120n + BigInt((attempt - 1) * 25);
-          txParams.maxFeePerGas = (fees.maxFeePerGas * mult) / 100n;
+          const bump = 120n + BigInt((attempt - 1) * 25);
+          const bumpedMax = (fees.maxFeePerGas * bump) / 100n;
+          const bumpedPrio = (fees.maxPriorityFeePerGas * bump) / 100n;
+          txParams.maxFeePerGas =
+            bumpedMax > baseMaxFee ? bumpedMax : baseMaxFee;
           txParams.maxPriorityFeePerGas =
-            (fees.maxPriorityFeePerGas * mult) / 100n;
+            bumpedPrio > basePrioFee ? bumpedPrio : basePrioFee;
         }
         const txHash = await walletClient.sendTransaction(txParams);
         lastUsedNonces.set(account.address.toLowerCase(), nonce);

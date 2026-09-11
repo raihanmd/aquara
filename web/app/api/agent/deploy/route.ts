@@ -553,8 +553,21 @@ async function runDeployPipeline(
             given && pairs.length === 1
               ? `${given[0]}/${given[1]}`
               : `${symOf(pair.tokenA)}/${symOf(pair.tokenB)}`;
-          let needA = toRaw(perPairUsd / 2, aLow);
-          let needB = toRaw(perPairUsd / 2, bLow);
+          // Demo OOR ships single-sided: the band sits fully above spot, so a
+          // concentrated position holds 100% token0 (lower address) and the
+          // other side would idle. Full budget goes to the held side.
+          const forceOorSingle =
+            process.env.NODE_ENV !== "production" && parsed.forceOor === true;
+          const aIsToken0 = aLow < bLow;
+          let needA: bigint;
+          let needB: bigint;
+          if (forceOorSingle) {
+            needA = aIsToken0 ? toRaw(perPairUsd, aLow) : 0n;
+            needB = aIsToken0 ? 0n : toRaw(perPairUsd, bLow);
+          } else {
+            needA = toRaw(perPairUsd / 2, aLow);
+            needB = toRaw(perPairUsd / 2, bLow);
+          }
           if (needA === 0n && needB === 0n)
             throw new Error(`pair ${i + 1} budget dust - capital too small`);
           const swaps: SwapLeg[] = [];
