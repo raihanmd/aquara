@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { loadConfig } from "./config.js";
 import { logInfo, logRotate, recentRotations } from "./log.js";
 import { evaluateMaker, fetchMakers, todayRotationCount } from "./evaluate.js";
-import { pickGroup, pickTopPairs, scoreReplacementPairs } from "../../web/lib/rotation.ts";
+import { pickTopPairs, scoreReplacementPairs } from "../../web/lib/rotation.ts";
 import type { Candidate } from "./evaluate.js";
 import { dockPosition } from "./dock.js";
 import { deployReplacement, pickPricedCapital, tokenBalance, clientFor } from "./deploy.js";
@@ -59,11 +59,11 @@ async function rotateOnce(maker: string): Promise<void> {
     }
     return;
   }
-  // Group rotation: candidates sharing one token rotate together so the
-  // shared side is never swapped. Every group is processed per tick until
-  // none remain (bounded), so "rotate everything" needs no manual repeats.
+  // One rotation per tick takes up to groupMaxSize eligible positions,
+  // whatever they hold. Proceeds pool in the wallet; destination tops overlap
+  // with EACH OTHER (the Aqua advantage), not with the dead positions.
   const at = new Date().toISOString();
-  async function rotateGroup(group: Candidate[], dominant: string): Promise<boolean> {
+  async function rotateGroup(group: Candidate[]): Promise<boolean> {
   // Replacement pair: best top earner by APY, falling back to the first
   // group member's pair when tops are unreachable. Rotation moves capital
   // toward yield, not back into the same dead range.
@@ -109,7 +109,7 @@ async function rotateOnce(maker: string): Promise<void> {
   const groupTag = group.map((c) => c.strategyHash.slice(0, 10)).join(",");
   const deployLabel = deployPairs.map((p) => `${p.tokenA.slice(0, 6)}/${p.tokenB.slice(0, 6)}`).join(" + ");
   if (dryRun) {
-    logRotate({ at, maker, strategyHash: group.map((c) => c.strategyHash.slice(0, 10)).join("+"), pair: deployLabel, decision: "dry-run", reason: `group of ${group.length} sharing ${dominant.slice(0, 10)} -> ${topNote}: ${reason}`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
+    logRotate({ at, maker, strategyHash: group.map((c) => c.strategyHash.slice(0, 10)).join("+"), pair: deployLabel, decision: "dry-run", reason: `group of ${group.length} -> ${topNote}: ${reason}`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
     return true;
   }
   // Pre-dock guard on the DEPLOY pairs: the pipeline budgets in USD, so if
@@ -174,15 +174,13 @@ async function rotateOnce(maker: string): Promise<void> {
   }
   }
 
-  // Rotate every group: after one group is docked its members are gone from
-  // the candidate set, so the next group forms from the remainder.
-  let remaining = [...candidates];
-  for (let round = 0; round < 5 && remaining.length > 0; round++) {
-    const picked = pickGroup(remaining, cfg.groupMaxSize);
-    if (picked.group.length === 0) break;
-    const progressed = await rotateGroup(picked.group, picked.dominant);
-    remaining = remaining.filter((c) => !picked.group.includes(c));
-    if (!progressed) break;
+  // One rotation per tick takes up to groupMaxSize eligible positions,
+  // whatever they hold. Source overlap is irrelevant: proceeds pool in the
+  // wallet and deploy into the top-scoring pairs, which overlap with EACH
+  // OTHER (the Aqua advantage), not with the dead positions.
+  const batch = candidates.slice(0, Math.max(1, cfg.groupMaxSize));
+  if (batch.length > 0) {
+    await rotateGroup(batch);
   }
 }
 
