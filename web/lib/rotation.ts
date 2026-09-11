@@ -140,7 +140,8 @@ export function decideTrash(args: {
     thresholds.trashApyVsTopFactor !== null &&
     topApy !== null &&
     topApy > 0 &&
-    (apy ?? 0) < topApy * thresholds.trashApyVsTopFactor
+    apy !== null &&
+    apy < topApy * thresholds.trashApyVsTopFactor
   ) {
     return { trash: true, reason: "underperforming-vs-top" };
   }
@@ -391,6 +392,89 @@ export function isPriceOutOfRange(args: {
   if (spot * 1000n < min * 995n) return true;
   if (spot * 1000n > max * 1005n) return true;
   return false;
+}
+
+export interface ScoredPair {
+  tokenA: string;
+  tokenB: string;
+  apy: number | null;
+  overlapShare: number;
+  score: number;
+}
+
+/**
+ * Take every top pair worth deploying, not a fixed count: all pairs scoring
+ * at least `minRatio` of the best (default 50%), capped at `maxPairs`.
+ * One good top = one deploy; two good tops = two deploys sharing capital.
+ */
+export function pickTopPairs(
+  ranked: ScoredPair[],
+  maxPairs = 3,
+  minRatio = 0.5,
+): ScoredPair[] {
+  if (ranked.length === 0) return [];
+  const best = ranked[0].score;
+  if (!(best > 0)) return [];
+  return ranked
+    .filter((r) => r.score >= best * minRatio)
+    .slice(0, Math.max(1, maxPairs));
+}
+
+/**
+ * Rank replacement pairs by APY weighted with holdings overlap. A pair whose
+ * tokens we already hold needs fewer swaps, so raw APY alone misleads:
+ * score = apy * (0.5 + 0.5 * overlapShare).
+ */
+export function scoreReplacementPairs(
+  tops: Array<{ tokens: Array<{ address?: string }>; apy: number | null }>,
+  holdings: Array<{ token: string; usd: number }>,
+): ScoredPair[] {
+  const total = holdings.reduce((n, h) => n + (h.usd > 0 ? h.usd : 0), 0);
+  const held = new Map(
+    holdings.map((h) => [h.token.toLowerCase(), h.usd > 0 ? h.usd : 0]),
+  );
+  const out: ScoredPair[] = [];
+  for (const t of tops) {
+    const addrs = (t.tokens ?? []).slice(0, 2).map((x) => String(x.address ?? "").toLowerCase());
+    if (addrs.length < 2 || !addrs[0] || !addrs[1]) continue;
+    if (t.apy === null || t.apy <= 0) continue;
+    const overlapUsd = (held.get(addrs[0]) ?? 0) + (held.get(addrs[1]) ?? 0);
+    const overlapShare = total > 0 ? Math.min(1, overlapUsd / total) : 0;
+    out.push({
+      tokenA: addrs[0],
+      tokenB: addrs[1],
+      apy: t.apy,
+      overlapShare,
+      score: t.apy * (0.5 + 0.5 * overlapShare),
+    });
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+export interface GroupMember {
+  strategyHash: string;
+  tokenA: string;
+  tokenB: string;
+}
+
+/** Group candidates by dominant shared token. A lone candidate forms its own group of one. */
+export function pickGroup<T extends GroupMember>(
+  candidates: T[],
+  maxSize: number,
+): { group: T[]; dominant: string } {
+  if (candidates.length === 0) return { group: [], dominant: "" };
+  const counts = new Map<string, number>();
+  for (const c of candidates) {
+    for (const t of [c.tokenA, c.tokenB]) {
+      const k = t.toLowerCase();
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+  }
+  const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+  const group = candidates
+    .filter((c) => c.tokenA.toLowerCase() === dominant || c.tokenB.toLowerCase() === dominant)
+    .slice(0, Math.max(1, maxSize));
+  return { group, dominant };
 }
 
 /** Scaled-integer gain gate: pass when gain/gas * 10000 >= minBps (20000 = 2x). */

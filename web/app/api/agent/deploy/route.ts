@@ -14,7 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
 import { AQUA_BASE, aquaHeaders } from "@/lib/aqua-api";
 import { verifyDeployIntent } from "@/lib/deploy-auth";
-import { agentSignAndSubmit, type CaliburCall } from "@/lib/calibur-agent";
+import { agentSignAndSubmit, simulateBatch, type CaliburCall } from "@/lib/calibur-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +28,11 @@ const bodySchema = z.object({
     .array(z.object({ tokenA: ADDR, tokenB: ADDR }))
     .min(1)
     .max(5),
+  // Execution mode: sequential submits per pair/leg (dashboard default,
+  // battle-tested), or batched (cron): one execute for approves+swaps, one
+  // for ships. Batched is atomic per batch and cheaper, sequential isolates
+  // failures per pair.
+  execution: z.enum(["sequential", "batched"]).optional().default("sequential"),
   symbols: z.tuple([z.string().min(1).max(12), z.string().min(1).max(12)]).optional(),
   mode: z.literal("aggressive").default("aggressive"),
   // Demo-only: shift the range fully above spot so the position opens OOR.
@@ -779,6 +784,170 @@ async function runDeployPipeline(
           (n, pl) => n + pl.swaps.reduce((m, s) => m + s.inRaw, 0n),
           0n,
         );
+        if (parsed.execution === "batched") {
+          // Batch 1: every approval + every swap leg in ONE execute. Atomic:
+          // revert means nothing moved, funds stay put.
+          const needRouterTotal = plans.reduce(
+            (n, pl) => n + pl.swaps.reduce((m, s) => m + s.inRaw, 0n),
+            0n,
+          );
+          const batch1: CaliburCall[] = [];
+          if (needRouterTotal > 0n) {
+            const allowRouter = await allowOf(capital, V6_ROUTER);
+            if (allowRouter < needRouterTotal) {
+              if (!isWhitelistedApprove(capital)) {
+                throw new Error(
+                  `approve router missing and ${capital.slice(0, 6)}… not whitelisted - approve ${V6_ROUTER.slice(0, 6)}… in your wallet first`,
+                );
+              }
+              batch1.push({
+                to: capital as Address,
+                value: 0n,
+                data: encodeApprove(V6_ROUTER, maxUint256),
+              });
+            }
+          }
+          const aquaNeeds = new Map<string, bigint>();
+          for (const pl of plans) {
+            if (pl.needA > 0n)
+              aquaNeeds.set(pl.tokenA, pl.needA > (aquaNeeds.get(pl.tokenA) ?? 0n) ? pl.needA : (aquaNeeds.get(pl.tokenA) ?? 0n));
+            if (pl.needB > 0n)
+              aquaNeeds.set(pl.tokenB, pl.needB > (aquaNeeds.get(pl.tokenB) ?? 0n) ? pl.needB : (aquaNeeds.get(pl.tokenB) ?? 0n));
+          }
+          for (const [tok, amt] of aquaNeeds) {
+            const alw = await allowOf(tok, AQUA);
+            if (alw < amt) {
+              if (!isWhitelistedApprove(tok)) {
+                throw new Error(
+                  `approve ${tok.slice(0, 6)}… to Aqua missing and token not whitelisted - approve in your wallet first, then retry`,
+                );
+              }
+              batch1.push({
+                to: tok as Address,
+                value: 0n,
+                data: encodeApprove(AQUA, maxUint256),
+              });
+            }
+          }
+          const allLegs = plans.flatMap((pl) =>
+            pl.swaps.map((s) => ({ plan: pl, leg: s })),
+          );
+          for (const { leg } of allLegs) {
+            batch1.push({ to: leg.to, value: leg.value, data: leg.data });
+          }
+          if (batch1.length > 0) {
+            const simErr = await simulateBatch(maker as Address, batch1);
+            if (simErr)
+              throw new Error(`batched approve+swap simulation failed (${simErr})`);
+            await pushStep({
+              pair: 0,
+              stage: "swapping",
+              detail: `${allLegs.length} swap(s) in one batch`,
+            });
+            const { txHash: swapBatchHash } = await agentSignAndSubmit(
+              maker as Address,
+              batch1,
+            );
+            await pushStep({
+              pair: 0,
+              stage: "swapped",
+              detail: "batched swaps confirmed on-chain",
+              txHash: swapBatchHash,
+            });
+            remainingCapIn = 0n;
+          }
+          // Measure, then batch 2: every ship in ONE execute.
+          const shipPlans: typeof plans = [];
+          for (const plan of plans) {
+            const i = plan.idx;
+            const postA = await balOfExec(plan.tokenA);
+            const postB = await balOfExec(plan.tokenB);
+            if (postA === 0n && postB === 0n) {
+              await pushStep({
+                pair: i,
+                stage: "failed",
+                detail: "swaps yielded nothing - skipping ship",
+              });
+              continue;
+            }
+            if (plan.range) {
+              await pushStep({
+                pair: i,
+                stage: "ranged",
+                detail: plan.demoOor
+                  ? "demo range pushed off-spot (intentionally OOR)"
+                  : "concentrated +-10% around spot",
+              });
+            }
+            const shipCall = (plan as unknown as { shipCall: CaliburCall }).shipCall;
+            await pushStep({
+              pair: i,
+              stage: "shipping",
+              detail: `${formatUnits(plan.needA, plan.decA)} + ${formatUnits(plan.needB, plan.decB)} to ship`,
+            });
+            shipPlans.push(plan);
+          }
+          if (shipPlans.length > 0) {
+            const shipCalls = shipPlans.map(
+              (pl) => (pl as unknown as { shipCall: CaliburCall }).shipCall,
+            );
+            const simErr = await simulateBatch(maker as Address, shipCalls);
+            if (simErr)
+              throw new Error(`batched ship simulation failed (${simErr})`);
+            const { txHash: shipBatchHash } = await agentSignAndSubmit(
+              maker as Address,
+              shipCalls,
+            );
+            for (const plan of shipPlans) {
+              const i = plan.idx;
+              await pushStep({
+                pair: i,
+                stage: "deployed",
+                detail: plan.label,
+                txHash: shipBatchHash,
+              });
+              try {
+                if (plan.strategyHash) {
+                  await prisma.managedStrategy.upsert({
+                    where: { strategyHash: plan.strategyHash },
+                    update: {
+                      mode,
+                      priceMin: plan.range?.min ?? null,
+                      priceMax: plan.range?.max ?? null,
+                      strategyBytes: plan.strategy,
+                      tokenA: plan.tokenA.toLowerCase(),
+                      tokenB: plan.tokenB.toLowerCase(),
+                    },
+                    create: {
+                      strategyHash: plan.strategyHash,
+                      maker: maker.toLowerCase(),
+                      chainId: 8453,
+                      mode,
+                      capitalToken: capital.toLowerCase(),
+                      priceMin: plan.range?.min ?? null,
+                      priceMax: plan.range?.max ?? null,
+                      strategyBytes: plan.strategy,
+                      tokenA: plan.tokenA.toLowerCase(),
+                      tokenB: plan.tokenB.toLowerCase(),
+                    },
+                  });
+                  await prisma.agentDecision.create({
+                    data: {
+                      maker: maker.toLowerCase(),
+                      chainId: 8453,
+                      strategyHash: plan.strategyHash,
+                      pair: plan.label,
+                      action: "ship",
+                      reason: opts?.reasonTag ? `${opts.reasonTag} (${mode})` : `agent deployed (${mode})`,
+                      txHash: shipBatchHash,
+                    },
+                  });
+                }
+              } catch {}
+              okCount++;
+            }
+          }
+        } else
         for (const plan of plans) {
           const i = plan.idx;
           try {

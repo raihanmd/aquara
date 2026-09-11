@@ -104,6 +104,9 @@ export async function fetchMakerPositions(
       if (Array.isArray(items)) return items;
       throw new Error("bad positions shape");
     } catch (e) {
+      // Non-retryable HTTP errors fail fast; only flaky statuses + network
+      // errors consume retry budget.
+      if (e instanceof Error && e.message.startsWith("Aqua API ")) throw e;
       lastErr = e;
     }
   }
@@ -117,9 +120,9 @@ export async function fetchTopPositions(
   apiKey: string,
 ): Promise<TopPosition[]> {
 
-  const isSingleChainFilter = chainIds.length === 1;
   const tryLeaderboard = async (): Promise<TopPosition[] | null> => {
-    if (isSingleChainFilter) return null;
+    // No chain guard: the leaderboard is global, per-maker strategies calls
+    // below still filter by chainIds. Falls back to recently-opened on !ok.
     try {
       const lbRes = await fetch(`${AQUA_BASE}/leaderboard/makers?limit=${limit * 2}`, {
         headers: { ...aquaHeaders(apiKey) },
@@ -140,7 +143,9 @@ export async function fetchTopPositions(
           });
           if (!stratRes.ok) continue;
           const sj = await stratRes.json();
-          const strats: any[] = sj.items ?? [];
+          const strats: any[] = (sj.items ?? []).filter(
+            (s: any) => chainIds.length === 0 || chainIds.includes(Number(s.chainId)),
+          );
           if (strats.length === 0) continue;
           let best = strats[0];
           let bestApy = -1;
@@ -244,6 +249,7 @@ export async function fetchTopPositions(
         return (bv ?? 0) - (av ?? 0);
       });
       const filtered = distinctOut.filter((p) => {
+        if (chainIds.length > 0 && !chainIds.includes(Number(p.chainId))) return false;
         const apy = p.performance?.fees?.last24h?.apy ?? p.performance?.fees?.last7d?.apy ?? p.performance?.fees?.last30d?.apy;
         const vol = p.performance?.volume?.last24h?.usd ?? p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd;
         return (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
@@ -376,7 +382,15 @@ export async function fetchTopPositions(
     return bVal - aVal;
   });
 
-  return distinct.slice(0, limit);
+  // Drop dead rows so dust never poses as "top". Enforce the requested
+  // chains client-side: upstream ignores chainIds on some endpoints.
+  const alive = distinct.filter((p) => {
+    if (chainIds.length > 0 && !chainIds.includes(Number(p.chainId))) return false;
+    const apy = p.performance?.fees?.last24h?.apy ?? p.performance?.fees?.last7d?.apy ?? p.performance?.fees?.last30d?.apy;
+    const vol = p.performance?.volume?.last24h?.usd ?? p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd;
+    return (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
+  });
+  return alive.slice(0, limit);
 }
 
 function isPerformance(v: unknown): boolean {

@@ -154,60 +154,94 @@ function isNonceError(e: unknown): boolean {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+export interface PreparedBatch {
+  seq: bigint;
+  calldata: Hex;
+}
+
+/** Build + sign a Calibur execute without sending. Free; safe to call for pre-simulation. */
+export async function prepareBatch(
+  userEOA: Address,
+  calls: CaliburCall[],
+  deadlineSeconds = 300,
+): Promise<PreparedBatch & { account: PrivateKeyAccount }> {
+  const { account, publicClient } = agentClients();
+  const keyHash = computeKeyHash(account.address);
+  const seq = await readSeqOf(publicClient, userEOA);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+  const impl = parse7702Target(await publicClient.getCode({ address: userEOA }));
+  if (!impl) throw new Error("User account is not a Calibur smart wallet");
+  const domain = await readCaliburDomain(publicClient, userEOA, impl);
+  const message = {
+    batchedCall: { calls, revertOnFailure: true as const },
+    nonce: seq,
+    keyHash,
+    executor: account.address,
+    deadline,
+  };
+  const signature = await account.signTypedData({
+    domain: {
+      name: domain.name,
+      version: domain.version,
+      chainId: domain.chainId,
+      verifyingContract: userEOA,
+      salt: domain.salt,
+    },
+    types: TYPES as any,
+    primaryType: "SignedBatchedCall",
+    message: message as any,
+  });
+  const wrappedSignature = encodeAbiParameters(
+    [{ type: "bytes" }, { type: "bytes" }],
+    [signature, "0x"],
+  );
+  const calldata = encodeFunctionData({
+    abi: EXECUTE_ABI,
+    functionName: "execute",
+    args: [message as any, wrappedSignature],
+  });
+  return { seq, calldata, account };
+}
+
+function readSeqOf(
+  publicClient: ReturnType<typeof agentClients>["publicClient"],
+  userEOA: Address,
+): Promise<bigint> {
+  return publicClient.readContract({
+    address: userEOA,
+    abi: GET_SEQ_ABI,
+    functionName: "getSeq",
+    args: [0n],
+  }) as Promise<bigint>;
+}
+
+/**
+ * eth_call the EXACT batch calldata (signed for real). Catches batch-level
+ * failures before spending gas. Returns null on success, error text on revert.
+ */
+export async function simulateBatch(
+  userEOA: Address,
+  calls: CaliburCall[],
+): Promise<string | null> {
+  const { publicClient } = agentClients();
+  try {
+    const { calldata } = await prepareBatch(userEOA, calls, 300);
+    await publicClient.call({ to: userEOA, data: calldata, value: 0n, account: userEOA });
+    return null;
+  } catch (e: unknown) {
+    const err = e as { shortMessage?: string; message?: string };
+    return err?.shortMessage || err?.message || "batch simulation reverted";
+  }
+}
+
 export async function agentSignAndSubmit(
   userEOA: Address,
   calls: CaliburCall[],
   deadlineSeconds = 300
 ): Promise<{ txHash: Hex; nonce: bigint }> {
   const { account, walletClient, publicClient } = agentClients();
-  const keyHash = computeKeyHash(account.address);
 
-  const impl = parse7702Target(
-    await publicClient.getCode({ address: userEOA })
-  );
-  if (!impl) throw new Error("User account is not a Calibur smart wallet");
-  const domain = await readCaliburDomain(publicClient, userEOA, impl);
-
-  const readSeq = () =>
-    publicClient.readContract({
-      address: userEOA,
-      abi: GET_SEQ_ABI,
-      functionName: "getSeq",
-      args: [0n],
-    }) as Promise<bigint>;
-
-  const signForSeq = async (seq: bigint) => {
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
-    const message = {
-      batchedCall: { calls, revertOnFailure: true as const },
-      nonce: seq,
-      keyHash,
-      executor: account.address,
-      deadline,
-    };
-    const signature = await account.signTypedData({
-      domain: {
-        name: domain.name,
-        version: domain.version,
-        chainId: domain.chainId,
-        verifyingContract: userEOA,
-        salt: domain.salt,
-      },
-      types: TYPES as any,
-      primaryType: "SignedBatchedCall",
-      message: message as any,
-    });
-    const wrappedSignature = encodeAbiParameters(
-      [{ type: "bytes" }, { type: "bytes" }],
-      [signature, "0x"]
-    );
-    const calldata = encodeFunctionData({
-      abi: EXECUTE_ABI,
-      functionName: "execute",
-      args: [message as any, wrappedSignature],
-    });
-    return { seq, calldata };
-  };
+  const readSeq = () => readSeqOf(publicClient, userEOA);
 
   // Serialize sends per relayer so concurrent jobs never share a nonce read.
   // The Calibur seq is re-read and re-signed on every attempt: RPC read lag
@@ -215,13 +249,11 @@ export async function agentSignAndSubmit(
   // chain rejects as a replay.
   return enqueueSubmit(account.address.toLowerCase(), async () => {
     let lastErr: unknown = null;
-    let seq = await readSeq();
-    let calldata = (await signForSeq(seq)).calldata;
+    let { seq, calldata } = await prepareBatch(userEOA, calls, deadlineSeconds);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) {
         await sleep(2000 * attempt);
-        seq = await readSeq();
-        calldata = (await signForSeq(seq)).calldata;
+        ({ seq, calldata } = await prepareBatch(userEOA, calls, deadlineSeconds));
       }
       const pending = BigInt(
         await publicClient.getTransactionCount({
@@ -231,6 +263,21 @@ export async function agentSignAndSubmit(
       );
       const floor = (lastUsedNonces.get(account.address.toLowerCase()) ?? -1n) + 1n;
       const nonce = pending > floor ? pending : floor;
+      // Batch-aware gas: estimate per send (batches vary in size), floor at
+        // single-call cost, fallback to per-call heuristic on failure.
+        let gasLimit = 1_200_000n;
+        try {
+          const est = await publicClient.estimateGas({
+            to: userEOA,
+            data: calldata,
+            value: 0n,
+            account: account.address,
+          });
+          const buffered = (est * 120n) / 100n;
+          gasLimit = buffered > 300_000n ? buffered : 300_000n;
+        } catch {
+          gasLimit = BigInt(calls.length) * 1_200_000n;
+        }
       try {
         const txParams: {
           to: Address;
@@ -245,7 +292,7 @@ export async function agentSignAndSubmit(
           to: userEOA,
           data: calldata,
           value: 0n,
-          gas: 1_200_000n,
+          gas: gasLimit,
           chain: base,
           nonce: Number(nonce),
         };

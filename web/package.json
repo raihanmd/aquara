@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev --turbo",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "bun test lib/"
   },
   "dependencies": {
     "@1inch/aqua-sdk": "^0.3.1",
