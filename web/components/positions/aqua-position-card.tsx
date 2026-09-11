@@ -112,6 +112,7 @@ export function AquaPositionCard({
     signal?.verdict === "oor-suspect" ||
     signal?.verdict === "depleted" ||
     signal?.verdict === "side-depleted";
+  const signalIdle = signal?.verdict === "inactive";
   const oor = position.isOutOfRange || signalOor === true;
 
   const illiquid = (position as any).isIlliquid === true;
@@ -209,6 +210,10 @@ export function AquaPositionCard({
             >
               Out of Range
             </Badge>
+          ) : signalIdle ? (
+            <Badge className="rounded-md bg-amber-500/15 text-amber-700 border-transparent px-2 py-0.5 text-[10px] font-medium">
+              Idle - never filled
+            </Badge>
           ) : (
             <Badge className="rounded-md bg-green-500/15 text-green-600 border-transparent px-2 py-0.5 text-[10px] font-medium">
               In Range
@@ -223,19 +228,20 @@ export function AquaPositionCard({
               <Badge
                 variant="destructive"
                 className="rounded-md px-2 py-0.5 text-[10px] font-semibold"
-                title={[signal.headline, ...signal.reasons].filter(Boolean).join(" — ")}
+                title={[signal.headline, ...signal.reasons].filter(Boolean).join(" - ")}
               >
                 <span className="mr-1 inline-block size-1.5 rounded-full bg-current" aria-hidden="true" />
                 Rotate recommended
               </Badge>
             ) : (
-              signal?.verdict === "oor-suspect" ||
+                signal?.verdict === "oor-suspect" ||
               signal?.verdict === "depleted" ||
-              signal?.verdict === "side-depleted"
+              signal?.verdict === "side-depleted" ||
+              signal?.verdict === "inactive"
             ) && (
               <Badge
                 className="rounded-md bg-amber-500/15 text-amber-700 border-transparent px-2 py-0.5 text-[10px] font-medium"
-                title={[signal.headline, ...signal.reasons].filter(Boolean).join(" — ")}
+                title={[signal.headline, ...signal.reasons].filter(Boolean).join(" - ")}
               >
                 <span className="mr-1 inline-block size-1.5 rounded-full bg-current" aria-hidden="true" />
                 Needs attention

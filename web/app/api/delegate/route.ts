@@ -122,7 +122,10 @@ export async function POST(req: Request) {
       args: [batch, wrappedSignature],
     });
 
-    const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL || "https://mainnet.base.org";
+    const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL;
+    if (!rpcUrl) {
+      return Response.json({ error: "NEXT_PUBLIC_RPC_URL missing - set your Alchemy RPC URL in web/.env" }, { status: 500 });
+    }
     const account = privateKeyToAccount(relayerPk);
     const walletClient = createWalletClient({ account, chain: base, transport: http(rpcUrl) });
     const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });

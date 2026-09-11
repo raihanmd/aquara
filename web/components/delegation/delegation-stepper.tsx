@@ -210,7 +210,7 @@ export function DelegationStepper({
             <div className="text-center space-y-1">
               <p className="text-sm font-medium">Agent pass active</p>
               <p className="text-xs text-muted-foreground">
-                The agent now manages {modeLabel} — every position included, no setup needed.
+                The agent now manages {modeLabel} - every position included, no setup needed.
               </p>
             </div>
 

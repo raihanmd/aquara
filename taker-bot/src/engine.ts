@@ -86,9 +86,14 @@ export async function executeFill(cfg: BotConfig, input: FillInput): Promise<Fil
     return r;
   };
 
-  const maxDrain = input.amountRaw.toLowerCase() === "max";
-  let amountValid = maxDrain;
-  if (!maxDrain) {
+  const drainMode =
+    input.amountRaw.toLowerCase() === "max"
+      ? "max"
+      : input.amountRaw.toLowerCase() === "half"
+        ? "half"
+        : null;
+  let amountValid = drainMode !== null;
+  if (!drainMode) {
     try {
       amountValid = BigInt(input.amountRaw) > 0n;
     } catch {
@@ -99,8 +104,9 @@ export async function executeFill(cfg: BotConfig, input: FillInput): Promise<Fil
     return done({ decision: "skip", reason: "missing tokenIn/amountRaw for fill" });
   }
   const tokenIn = input.tokenIn as Address;
-  const wantsMax = input.amountRaw.toLowerCase() === "max";
-  const exactOut = input.exactOut === true || wantsMax;
+  const wantsMax = drainMode === "max";
+  const wantsHalf = drainMode === "half";
+  const exactOut = input.exactOut === true || drainMode !== null;
   const amountIn = !exactOut ? BigInt(input.amountRaw) : 0n;
   const taker = (input.taker ?? cfg.taker ?? cfg.maker) as Address;
 
@@ -180,7 +186,7 @@ export async function executeFill(cfg: BotConfig, input: FillInput): Promise<Fil
   const takerTraits = exactOut ? baseTraits.with({ exactIn: false }) : baseTraits;
 
   let amountForQuote: bigint;
-  if (exactOut && wantsMax) {
+  if (exactOut && (wantsMax || wantsHalf)) {
     try {
       const rb = (await publicClient.readContract({
         address: AQUA_REGISTRY,
@@ -192,7 +198,12 @@ export async function executeFill(cfg: BotConfig, input: FillInput): Promise<Fil
       if (bal <= 0n) {
         return done({ decision: "skip", reason: "drain target empty - side depleted" });
       }
-      amountForQuote = bal;
+      // Never drain 100%: emptying a side trips underflow invariants in the
+      // quoter path. "max" leaves 1% dust behind, "half" takes 50%.
+      amountForQuote = wantsHalf ? bal / 2n : (bal * 99n) / 100n;
+      if (amountForQuote <= 0n) {
+        return done({ decision: "skip", reason: "drain target dust after reserve - side depleted" });
+      }
     } catch {
       return done({ decision: "skip", reason: "drain balance read failed" });
     }
