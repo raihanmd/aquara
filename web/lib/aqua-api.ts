@@ -75,6 +75,28 @@ export function getApiKey(): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Dev-only pacing: one shared 1inch key serves web, rotator and scripts, and
+// a single dashboard load fans out dozens of calls. In non-prod every
+// upstream call waits its turn with a gap, so bursts never form. Prod gap is
+// zero (latency matters there; retries still apply). Tune: AQUA_DEV_GAP_MS.
+const DEV_GAP_MS =
+  process.env.NODE_ENV !== "production" && process.env.NODE_ENV !== "test"
+    ? Math.max(0, Number(process.env.AQUA_DEV_GAP_MS ?? 300) || 300)
+    : 0;
+let paceTail: Promise<void> = Promise.resolve();
+export async function pace(): Promise<void> {
+  if (DEV_GAP_MS <= 0) return;
+  const prev = paceTail;
+  let release!: () => void;
+  paceTail = new Promise((r) => (release = r));
+  try {
+    await prev;
+    await sleep(DEV_GAP_MS);
+  } finally {
+    release();
+  }
+}
+
 /**
  * Upstream fetch with 429/502/503-aware retries. 1inch throttles hard;
  * without backoff a single dashboard load (dozens of fan-out calls) burns
@@ -83,6 +105,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function fetchUpstream(url: string, apiKey: string, tries = 3): Promise<Response> {
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < tries; attempt++) {
+    await pace();
     if (attempt > 0) await sleep(1000 * attempt);
     try {
       const res = await fetch(url, { headers: { ...aquaHeaders(apiKey) } });
@@ -122,6 +145,7 @@ export async function fetchMakerPositions(
   );
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < 4; attempt++) {
+    await pace();
     if (attempt > 0) await sleep(1500 * attempt);
     try {
       const res = await fetch(`${AQUA_BASE}/strategies/makers/${maker}?${qs}`, {
@@ -185,10 +209,12 @@ async function fetchTopPositionsInner(
       const out: TopPosition[] = [];
       // Cap makers processed: the leaderboard is pre-ranked, so the first
       // (limit + 2) makers suffice. Was limit * 3 with 2 calls each (37+
-      // requests per refresh) — the main quota burner.
+      // requests per refresh) - the main quota burner.
       for (const m of makers.slice(0, limit + 2)) {
         const maker = m.maker as string;
         if (!maker) continue;
+        // Makers with no open strategies only burn quota: skip before fetching.
+        if (typeof m.strategies?.open === "number" && m.strategies.open === 0) continue;
         try {
           const qs = new URLSearchParams({ limit: "10" });
           chainIds.forEach((id) => qs.append("chainIds", String(id)));
@@ -199,13 +225,22 @@ async function fetchTopPositionsInner(
             (s: any) => chainIds.length === 0 || chainIds.includes(Number(s.chainId)),
           );
           if (strats.length === 0) continue;
-          let best = strats[0];
-          let bestApy = -1;
-          for (const s of strats) {
+          // Best strategy follows the requested sort: volume-ranked makers
+          // need their highest-volume strategy, not highest-APY one.
+          const metric = (s: any): number => {
+            if (sortBy === "volume") {
+              const v = s.performance?.volume?.last24h?.usd ?? s.performance?.volume?.last7d?.usd ?? s.performance?.volume?.last30d?.usd;
+              return typeof v === "number" ? v : -1;
+            }
             const apy = s.performance?.fees?.last30d?.apy ?? s.performance?.fees?.total?.apy ?? -1;
-            const v = apy ?? -1;
-            if (v > bestApy) {
-              bestApy = v;
+            return apy ?? -1;
+          };
+          let best = strats[0];
+          let bestScore = -1;
+          for (const s of strats) {
+            const v = metric(s);
+            if (v > bestScore) {
+              bestScore = v;
               best = s;
             }
           }

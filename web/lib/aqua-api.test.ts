@@ -152,6 +152,73 @@ describe("fetchTopPositions", () => {
     expect(hits).toBe(1);
   });
 
+  test("makers with zero open strategies are skipped before fetching", async () => {
+    const fetched: string[] = [];
+    const mk = (h: string, sym: string) => ({
+      ...strat(h, 50, 100),
+      tokens: [
+        { address: `0x${sym.toLowerCase()}`, symbol: sym, currentBalance: { raw: "1", usd: 1 } },
+        { address: "0xb", symbol: "B", currentBalance: { raw: "1", usd: 1 } },
+      ],
+    });
+    const byMaker: Record<string, unknown[]> = {
+      "0xmaker1": [mk("0xh1", "A")],
+      "0xmaker2": [mk("0xh2", "C")],
+    };
+    globalThis.fetch = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/leaderboard/makers")) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              { maker: "0xdead", strategies: { open: 0 } },
+              { maker: "0xmaker1" },
+              { maker: "0xmaker2" },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (u.includes("/strategies/makers/")) {
+        fetched.push(u);
+        const key = ["0xmaker1", "0xmaker2"].find((k) => u.includes(k)) ?? "0xmaker1";
+        return new Response(JSON.stringify({ items: byMaker[key] }), { status: 200 });
+      }
+      if (u.includes("/strategies/overview/")) {
+        const all = [...byMaker["0xmaker1"], ...byMaker["0xmaker2"]];
+        const hit = all.find((s: any) => u.includes(s.strategyHash)) ?? all[0];
+        return new Response(JSON.stringify(hit), { status: 200 });
+      }
+      throw new Error(`unexpected ${u}`);
+    }) as typeof fetch;
+    const out = await fetchTopPositions([8453], 6, "apy", "key");
+    expect(fetched.some((u) => u.includes("0xdead"))).toBe(false);
+    expect(out.length).toBe(2);
+  });
+
+  test("volume sort picks highest-volume strategy per maker", async () => {
+    const s1 = { ...strat("0xlowvol", 99, 1), tokens: [{ address: "0xa", symbol: "A", currentBalance: { raw: "1", usd: 1 } }, { address: "0xb", symbol: "B", currentBalance: { raw: "1", usd: 1 } }] };
+    const s2 = { ...strat("0xhighvol", 1, 999), tokens: [{ address: "0xc", symbol: "C", currentBalance: { raw: "1", usd: 1 } }, { address: "0xd", symbol: "D", currentBalance: { raw: "1", usd: 1 } }] };
+    const s3 = { ...strat("0xother", 50, 500), tokens: [{ address: "0xe", symbol: "E", currentBalance: { raw: "1", usd: 1 } }, { address: "0xf", symbol: "F", currentBalance: { raw: "1", usd: 1 } }] };
+    const byUrl = (u: string) => (u.includes("/strategies/makers/0xmaker2") ? [s3] : [s1, s2]);
+    const byHash = (u: string) => (u.includes("0xhighvol") ? s2 : u.includes("0xother") ? s3 : s1);
+    globalThis.fetch = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/leaderboard/makers")) {
+        return new Response(JSON.stringify({ items: [{ maker: "0xmaker" }, { maker: "0xmaker2" }] }), { status: 200 });
+      }
+      if (u.includes("/strategies/makers/")) {
+        return new Response(JSON.stringify({ items: byUrl(u) }), { status: 200 });
+      }
+      if (u.includes("/strategies/overview/")) {
+        return new Response(JSON.stringify(byHash(u)), { status: 200 });
+      }
+      throw new Error(`unexpected ${u}`);
+    }) as typeof fetch;
+    const out = await fetchTopPositions([8453], 6, "volume", "key");
+    expect(out[0].strategyHash).toBe("0xhighvol");
+  });
+
   test("dead rows never pose as top", async () => {
     globalThis.fetch = (async (url: unknown) => {
       const u = String(url);
