@@ -76,6 +76,36 @@ export function getApiKey(): string {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Upstream fetch with 429/502/503-aware retries. 1inch throttles hard;
+ * without backoff a single dashboard load (dozens of fan-out calls) burns
+ * the key quota and everything 429s together.
+ */
+async function fetchUpstream(url: string, apiKey: string, tries = 3): Promise<Response> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    if (attempt > 0) await sleep(1000 * attempt);
+    try {
+      const res = await fetch(url, { headers: { ...aquaHeaders(apiKey) } });
+      if (res.status === 502 || res.status === 503 || res.status === 429) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        if (Number.isFinite(retryAfter) && retryAfter > 0 && retryAfter <= 30) {
+          await sleep(retryAfter * 1000);
+        }
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("upstream fetch failed");
+}
+
+// In-flight dedupe: concurrent identical tops requests (StrictMode double
+// mount, dashboard + signal + rotator at once) share one upstream burst.
+const topsInflight = new Map<string, Promise<TopPosition[]>>();
+
+/**
  * Live positions for a maker with retries. The 1inch API flakes with
  * transient 502/503/429s; a single attempt turns the whole signal/rotator
  * run empty, so retry with backoff before giving up.
@@ -119,28 +149,50 @@ export async function fetchTopPositions(
   sortBy: "apy" | "volume",
   apiKey: string,
 ): Promise<TopPosition[]> {
+  const key = `tops|${[...chainIds].sort().join(",")}|${limit}|${sortBy}`;
+  const inflight = topsInflight.get(key);
+  if (inflight) return inflight;
+  const p = fetchTopPositionsInner(chainIds, limit, sortBy, apiKey).finally(() => {
+    topsInflight.delete(key);
+  });
+  topsInflight.set(key, p);
+  return p;
+}
+
+async function fetchTopPositionsInner(
+  chainIds: number[],
+  limit: number,
+  sortBy: "apy" | "volume",
+  apiKey: string,
+): Promise<TopPosition[]> {
 
   const tryLeaderboard = async (): Promise<TopPosition[] | null> => {
-    // No chain guard: the leaderboard is global, per-maker strategies calls
-    // below still filter by chainIds. Falls back to recently-opened on !ok.
+    // No chain guard: the leaderboard is global (no chainIds param), per-maker
+    // strategies calls below still filter by chainIds. sortBy maps 1:1 to the
+    // leaderboard columns; period=7d is the default window. Falls back to
+    // recently-opened on !ok.
     try {
-      const lbRes = await fetch(`${AQUA_BASE}/leaderboard/makers?limit=${limit * 2}`, {
-        headers: { ...aquaHeaders(apiKey) },
+      const lbQs = new URLSearchParams({
+        limit: String(limit * 2),
+        sortBy: sortBy === "apy" ? "apy" : "volume",
+        period: "7d",
       });
+      const lbRes = await fetchUpstream(`${AQUA_BASE}/leaderboard/makers?${lbQs}`, apiKey);
       if (!lbRes.ok) return null;
       const lb = await lbRes.json();
       const makers: any[] = lb.items ?? []
       if (makers.length === 0) return null;
       const out: TopPosition[] = [];
-      for (const m of makers.slice(0, limit * 3)) {
+      // Cap makers processed: the leaderboard is pre-ranked, so the first
+      // (limit + 2) makers suffice. Was limit * 3 with 2 calls each (37+
+      // requests per refresh) — the main quota burner.
+      for (const m of makers.slice(0, limit + 2)) {
         const maker = m.maker as string;
         if (!maker) continue;
         try {
           const qs = new URLSearchParams({ limit: "10" });
           chainIds.forEach((id) => qs.append("chainIds", String(id)));
-          const stratRes = await fetch(`${AQUA_BASE}/strategies/makers/${maker}?${qs.toString()}`, {
-            headers: { ...aquaHeaders(apiKey) },
-          });
+          const stratRes = await fetchUpstream(`${AQUA_BASE}/strategies/makers/${maker}?${qs.toString()}`, apiKey);
           if (!stratRes.ok) continue;
           const sj = await stratRes.json();
           const strats: any[] = (sj.items ?? []).filter(
@@ -163,9 +215,7 @@ export async function fetchTopPositions(
           const hash = strat.strategyHash as string;
           let overview: any = strat;
           try {
-            const ovRes = await fetch(`${AQUA_BASE}/strategies/overview/${cid}/${maker}/${app}/${hash}`, {
-              headers: { ...aquaHeaders(apiKey) },
-            });
+            const ovRes = await fetchUpstream(`${AQUA_BASE}/strategies/overview/${cid}/${maker}/${app}/${hash}`, apiKey, 2);
             if (ovRes.ok) overview = await ovRes.json();
           } catch {}
           let perf = (overview.performance as TopPositionPerformance) ?? (strat.performance as TopPositionPerformance) ?? null;
@@ -252,7 +302,10 @@ export async function fetchTopPositions(
         if (chainIds.length > 0 && !chainIds.includes(Number(p.chainId))) return false;
         const apy = p.performance?.fees?.last24h?.apy ?? p.performance?.fees?.last7d?.apy ?? p.performance?.fees?.last30d?.apy;
         const vol = p.performance?.volume?.last24h?.usd ?? p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd;
-        return (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
+        const hasSignal = (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
+        if (!hasSignal) return false;
+        if (rowSizeUsd(p) > 1e9 && (vol ?? 0) <= 0) return false;
+        return true;
       });
       return filtered.length >= 2 ? filtered.slice(0, limit) : null;
     } catch {
@@ -269,13 +322,9 @@ export async function fetchTopPositions(
   });
   chainIds.forEach((id) => params.append("chainIds", String(id)));
 
-  const res = await fetch(
+  const res = await fetchUpstream(
     `${AQUA_BASE}/strategies/opened?${params.toString()}`,
-    {
-      headers: {
-        ...aquaHeaders(apiKey),
-      },
-    },
+    apiKey,
   );
 
   if (!res.ok) {
@@ -307,13 +356,10 @@ export async function fetchTopPositions(
         }
 
         try {
-          const overviewRes = await fetch(
+          const overviewRes = await fetchUpstream(
             `${AQUA_BASE}/strategies/overview/${chainId}/${maker}/${app}/${strategyHash}`,
-            {
-              headers: {
-                ...aquaHeaders(apiKey),
-              },
-            },
+            apiKey,
+            2,
           );
 
           if (!overviewRes.ok) {
@@ -383,14 +429,28 @@ export async function fetchTopPositions(
   });
 
   // Drop dead rows so dust never poses as "top". Enforce the requested
-  // chains client-side: upstream ignores chainIds on some endpoints.
+  // chains client-side: upstream ignores chainIds on some endpoints. Also
+  // drop absurd whale rows (size over $1B with zero volume/APY): upstream
+  // decimals garbage, and showing "$666,542,382M size, $0 volume" destroys
+  // trust in the whole panel.
   const alive = distinct.filter((p) => {
     if (chainIds.length > 0 && !chainIds.includes(Number(p.chainId))) return false;
     const apy = p.performance?.fees?.last24h?.apy ?? p.performance?.fees?.last7d?.apy ?? p.performance?.fees?.last30d?.apy;
     const vol = p.performance?.volume?.last24h?.usd ?? p.performance?.volume?.last7d?.usd ?? p.performance?.volume?.last30d?.usd;
-    return (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
+    const hasSignal = (apy !== null && apy !== undefined && apy > 0) || (vol !== null && vol !== undefined && vol > 0);
+    if (!hasSignal) return false;
+    if (rowSizeUsd(p) > 1e9 && (vol ?? 0) <= 0) return false;
+    return true;
   });
   return alive.slice(0, limit);
+}
+
+function rowSizeUsd(p: TopPosition): number {
+  return (p.tokens ?? []).reduce((n, t) => {
+    const b = t.currentBalance;
+    const u = typeof b === "object" && b !== null ? b.usd : null;
+    return n + (typeof u === "number" && Number.isFinite(u) ? u : 0);
+  }, 0);
 }
 
 function isPerformance(v: unknown): boolean {

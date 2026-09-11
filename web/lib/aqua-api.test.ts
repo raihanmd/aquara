@@ -112,6 +112,46 @@ describe("fetchTopPositions", () => {
     expect(out.length).toBe(1);
   });
 
+  test("absurd whale row with zero volume is dropped", async () => {
+    const whale = {
+      ...strat("0xwhale", null, null),
+      tokens: [
+        { address: "0xa", symbol: "A", currentBalance: { raw: "1", usd: 2e9 } },
+        { address: "0xb", symbol: "B", currentBalance: { raw: "1", usd: 1 } },
+      ],
+    };
+    globalThis.fetch = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/leaderboard/")) return new Response("{}", { status: 404 });
+      if (u.includes("/strategies/opened")) {
+        return new Response(JSON.stringify([whale]), { status: 200 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    expect(await fetchTopPositions([8453], 6, "apy", "key")).toEqual([]);
+  });
+
+  test("concurrent identical calls share one upstream burst", async () => {
+    let hits = 0;
+    globalThis.fetch = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/leaderboard/makers")) {
+        hits++;
+        await new Promise((r) => setTimeout(r, 50));
+        return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      }
+      if (u.includes("/strategies/opened")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    await Promise.all([
+      fetchTopPositions([8453], 6, "apy", "key"),
+      fetchTopPositions([8453], 6, "apy", "key"),
+    ]);
+    expect(hits).toBe(1);
+  });
+
   test("dead rows never pose as top", async () => {
     globalThis.fetch = (async (url: unknown) => {
       const u = String(url);
