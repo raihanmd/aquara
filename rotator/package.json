@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --hot src/index.ts",
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "test": "bun test evaluate.test.ts"
   },
   "dependencies": {
     "@1inch/aqua-sdk": "^0.3.1",

@@ -168,39 +168,44 @@ async function consolidateProceeds(
  * funds, and deploying those instead of the proceeds silently shrinks or
  * misallocates the rotation.
  */
-export interface PreDockBalances {
-  tokenA: string;
-  tokenB: string;
-  balA: bigint;
-  balB: bigint;
+export interface PreDockBaseline {
+  token: string;
+  bal: bigint;
 }
 
 export async function deployReplacement(
   cfg: RotatorConfig,
   c: Candidate,
-  pre: PreDockBalances,
-  pairOverride?: { tokenA: string; tokenB: string },
+  pre: PreDockBaseline[],
+  deployPairs: Array<{ tokenA: string; tokenB: string }>,
 ): Promise<DeployResult> {
   const client = clientFor(cfg.rpcUrl);
-  const tA = pairOverride?.tokenA ?? c.tokenA;
-  const tB = pairOverride?.tokenB ?? c.tokenB;
-  const capital = (await pickPricedCapital(cfg.oneinchKey, tA, tB)) ?? tA;
-  const other = capital.toLowerCase() === tA.toLowerCase() ? tB : tA;
-  // Consolidate the minor proceeds side into capital first so nothing strands.
-  // Baselines are pre-dock reads; the delta after docking is the proceeds.
-  const otherPre =
-    pre.tokenA.toLowerCase() === other.toLowerCase() ? pre.balA : pre.balB;
-  const postOther = await tokenBalance(client, other, c.maker);
-  const minorAmount = postOther > otherPre ? postOther - otherPre : 0n;
-  const con = await consolidateProceeds(cfg, c.maker as Address, capital, other, minorAmount, client);
+  const pairToks = [...new Set(deployPairs.flatMap((p) => [p.tokenA.toLowerCase(), p.tokenB.toLowerCase()]))];
+  let capital = deployPairs[0].tokenA;
+  for (const t of pairToks) {
+    if ((await pickPricedCapital(cfg.oneinchKey, t, t)) !== null) {
+      capital = t;
+      break;
+    }
+  }
+  // Consolidate every non-capital proceeds token into capital so the ladder
+  // ships the full pooled amount. Baselines are pre-dock reads; deltas are
+  // proceeds, which excludes pre-existing wallet funds.
+  const preMap = new Map(pre.map((p) => [p.token.toLowerCase(), p.bal]));
+  let consolidated = false;
+  for (const p of pre) {
+    if (p.token.toLowerCase() === capital.toLowerCase()) continue;
+    const post = await tokenBalance(client, p.token, c.maker);
+    const delta = post > p.bal ? post - p.bal : 0n;
+    if (delta === 0n) continue;
+    const con = await consolidateProceeds(cfg, c.maker as Address, capital, p.token, delta, client);
+    consolidated = consolidated || con.consolidated;
+  }
   const decC = (await client.readContract({
     address: capital as Address, abi: ERC20_MIN, functionName: "decimals",
   })) as number;
-  const capPre =
-    pre.tokenA.toLowerCase() === capital.toLowerCase() ? pre.balA : pre.balB;
+  const capPre = preMap.get(capital.toLowerCase()) ?? 0n;
   const capPost = await tokenBalance(client, capital, c.maker);
-  // Proceeds = post-dock balance minus pre-dock baseline. Pre-existing wallet
-  // funds are excluded, so unrelated holdings never leak into the rotation.
   const amount = capPost > capPre ? capPost - capPre : 0n;
   if (amount === 0n) return { ok: false, reason: "dock proceeds are zero" };
   const res = await fetch(`${cfg.webBase}/api/agent/deploy`, {
@@ -210,8 +215,8 @@ export async function deployReplacement(
       maker: c.maker,
       capital,
       capitalAmount: formatUnits(amount, decC),
-      pairs: [{ tokenA: tA, tokenB: tB }],
-      ...(c.symbols ? { symbols: c.symbols } : {}),
+      pairs: deployPairs.map((p) => ({ tokenA: p.tokenA, tokenB: p.tokenB })),
+      execution: "batched",
       mode: "aggressive",
       reason: `cron rotation of ${c.strategyHash.slice(0, 10)} (${c.verdict}, gain ${c.gainUsd.toFixed(2)}/${c.gasUsd})`,
     }),

@@ -13,6 +13,7 @@
     "build:web": "bun --cwd web build",
     "start:bot": "bun --cwd taker-bot start",
     "dev:rotator": "bun --cwd rotator dev",
-    "start:rotator": "bun --cwd rotator start"
+    "start:rotator": "bun --cwd rotator start",
+    "test": "bun test web/lib/ rotator/evaluate.test.ts"
   }
 }

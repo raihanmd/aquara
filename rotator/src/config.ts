@@ -14,6 +14,9 @@ export interface RotatorConfig {
   minGainBps: number;
   gasUsd: number;
   maxPerDay: number;
+  groupMaxSize: number;
+  topMaxPairs: number;
+  topMinRatio: number;
   dailyGasCapUsd: number;
   intervalMs: number;
   port: number;
@@ -53,6 +56,12 @@ export function loadConfig(): RotatorConfig {
     aiEnabled: bool("ROT_AI_ENABLED", true),
     minGainBps: num("ROT_MIN_GAIN_BPS", 20000),
     gasUsd: num("ROT_GAS_USD", 0.08),
+    groupMaxSize: num("ROT_GROUP_MAX_SIZE", 3),
+    topMaxPairs: num("ROT_TOP_MAX_PAIRS", 3),
+    topMinRatio: (() => {
+      const v = Number(process.env.ROT_TOP_MIN_RATIO);
+      return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.5;
+    })(),
     maxPerDay: num("ROT_MAX_PER_DAY", 1),
     dailyGasCapUsd: num("ROT_DAILY_GAS_CAP_USD", 1.0),
     intervalMs: num("ROT_INTERVAL_MS", 900000),

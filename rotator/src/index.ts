@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { loadConfig } from "./config.js";
 import { logInfo, logRotate, recentRotations } from "./log.js";
 import { evaluateMaker, fetchMakers, todayRotationCount } from "./evaluate.js";
+import { pickGroup, pickTopPairs, scoreReplacementPairs } from "../../web/lib/rotation.ts";
+import type { Candidate } from "./evaluate.js";
 import { dockPosition } from "./dock.js";
 import { deployReplacement, pickPricedCapital, tokenBalance, clientFor } from "./deploy.js";
 import type { Address, Hex } from "viem";
@@ -47,8 +49,8 @@ async function rotateOnce(maker: string): Promise<void> {
     logRotate({ at: new Date().toISOString(), maker, strategyHash: "", pair: "", decision: "skip", reason: `daily gas cap $${cfg.dailyGasCapUsd} would exceed`, dryRun });
     return;
   }
-  const { candidate, reason, checked, outcomes } = await evaluateMaker(cfg, maker);
-  if (!candidate) {
+  const { candidate, candidates, reason, checked, outcomes } = await evaluateMaker(cfg, maker);
+  if (!candidate || candidates.length === 0) {
     for (const o of outcomes) {
       logRotate({ at: new Date().toISOString(), maker, strategyHash: o.hash, pair: o.pair, decision: "skip", reason: o.reasons.join("; "), verdict: o.verdict, aiLevel: o.aiLevel ?? undefined, dryRun });
     }
@@ -57,81 +59,130 @@ async function rotateOnce(maker: string): Promise<void> {
     }
     return;
   }
+  // Group rotation: candidates sharing one token rotate together so the
+  // shared side is never swapped. Every group is processed per tick until
+  // none remain (bounded), so "rotate everything" needs no manual repeats.
   const at = new Date().toISOString();
-  if (dryRun) {
-    logRotate({ at, maker, strategyHash: candidate.strategyHash, pair: candidate.pair, decision: "dry-run", reason, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
-    return;
-  }
-  // Pre-dock guard: the deploy pipeline budgets in USD. If neither proceeds
-  // token has a price, the redeploy would fail AFTER docking and strand funds
-  // in the wallet. Skip while the position is still intact. Needs ROT_ONEINCH_KEY.
-  const priced = cfg.oneinchKey
-    ? await pickPricedCapital(cfg.oneinchKey, candidate.tokenA, candidate.tokenB)
-    : candidate.tokenA;
-  if (!priced) {
-    logRotate({ at, maker, strategyHash: candidate.strategyHash, pair: candidate.pair, decision: "skip", reason: "no USD price for either proceeds token - docking would strand funds", verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
-    return;
-  }
-  // Replacement pair: best top earner by APY, falling back to the same pair
-  // when tops are unreachable. Rotation moves capital toward yield, not back
-  // into the same dead range.
-  let pairOverride: { tokenA: string; tokenB: string } | undefined;
+  async function rotateGroup(group: Candidate[], dominant: string): Promise<boolean> {
+  // Replacement pair: best top earner by APY, falling back to the first
+  // group member's pair when tops are unreachable. Rotation moves capital
+  // toward yield, not back into the same dead range.
+  const groupHoldings = (c: Candidate) =>
+    [c.tokenA, c.tokenB].map((t) => ({ token: t, usd: 1 }));
+  let deployPairs = [{ tokenA: group[0].tokenA, tokenB: group[0].tokenB }];
+  let topNote = "same pair (tops unreachable)";
   try {
     const tops = (await (
       await fetch(`${cfg.webBase}/api/aqua/top?limit=6&sortBy=apy&chainIds=8453`, {
         headers: { accept: "application/json" },
       })
-    ).json()) as { data?: Array<{ tokens?: Array<{ address?: string }> }> };
-    const top = (tops?.data ?? []).find(
-      (t) =>
-        Array.isArray(t?.tokens) &&
-        t.tokens.length >= 2 &&
-        t.tokens[0].address &&
-        t.tokens[1].address,
+    ).json()) as {
+      data?: Array<{
+        tokens?: Array<{ address?: string }>;
+        performance?: { fees?: { last24h?: { apy?: number }; last7d?: { apy?: number }; total?: { apy?: number } } };
+      }>;
+    };
+    const holdings = group.flatMap(groupHoldings);
+    const ranked = scoreReplacementPairs(
+      (tops?.data ?? []).map((t) => ({
+        tokens: (t.tokens ?? []).map((x) => ({ address: x.address })),
+        apy:
+          t.performance?.fees?.last24h?.apy ??
+          t.performance?.fees?.last7d?.apy ??
+          t.performance?.fees?.total?.apy ??
+          null,
+      })),
+      holdings,
     );
-    if (top?.tokens?.[0]?.address && top?.tokens?.[1]?.address) {
-      pairOverride = {
-        tokenA: String(top.tokens[0].address),
-        tokenB: String(top.tokens[1].address),
-      };
+    const picked = pickTopPairs(ranked, cfg.topMaxPairs, cfg.topMinRatio);
+    if (picked.length > 0) {
+      deployPairs = picked.map((r) => ({ tokenA: r.tokenA, tokenB: r.tokenB }));
+      const first = picked[0];
+      const rank = ranked.findIndex((r) => r.tokenA === first.tokenA && r.tokenB === first.tokenB) + 1;
+      topNote = picked.length > 1
+        ? `top ${picked.length} (best #${rank} APY ${first.apy}%)`
+        : `top #${rank} APY ${first.apy}%`;
     }
   } catch {
-    // tops unreachable: redeploy same pair
+    // tops unreachable: redeploy first member pair
+  }
+  const groupTag = group.map((c) => c.strategyHash.slice(0, 10)).join(",");
+  const deployLabel = deployPairs.map((p) => `${p.tokenA.slice(0, 6)}/${p.tokenB.slice(0, 6)}`).join(" + ");
+  if (dryRun) {
+    logRotate({ at, maker, strategyHash: group.map((c) => c.strategyHash.slice(0, 10)).join("+"), pair: deployLabel, decision: "dry-run", reason: `group of ${group.length} sharing ${dominant.slice(0, 10)} -> ${topNote}: ${reason}`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
+    return true;
+  }
+  // Pre-dock guard on the DEPLOY pairs: the pipeline budgets in USD, so if
+  // none of the deploy tokens has a price the redeploy fails AFTER docking
+  // and strands funds. Skip while positions are intact. Needs ROT_ONEINCH_KEY.
+  const deployToks = [...new Set(deployPairs.flatMap((p) => [p.tokenA, p.tokenB]))];
+  let priced: string | null = null;
+  if (cfg.oneinchKey) {
+    for (const t of deployToks) {
+      if ((await pickPricedCapital(cfg.oneinchKey, t, t)) !== null) {
+        priced = t;
+        break;
+      }
+    }
+  } else {
+    priced = deployToks[0];
+  }
+  if (!priced) {
+    logRotate({ at, maker, strategyHash: groupTag, pair: deployLabel, decision: "skip", reason: "no USD price for deploy pairs - docking would strand funds", verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
+    return true;
   }
   try {
-    // Baseline both sides BEFORE docking: proceeds = post-dock minus baseline,
-    // so unrelated wallet holdings never leak into the rotation capital.
+    // Baseline every group token BEFORE docking: proceeds = post-dock minus
+    // baselines, so unrelated wallet holdings never leak into the capital.
     const rotClient = clientFor(cfg.rpcUrl);
-    const [preA, preB] = await Promise.all([
-      tokenBalance(rotClient, candidate.tokenA, candidate.maker),
-      tokenBalance(rotClient, candidate.tokenB, candidate.maker),
-    ]);
-    const dockTx = await dockPosition({
-      maker: candidate.maker as Address,
-      aqua: cfg.aqua,
-      app: cfg.app,
-      strategyHash: candidate.strategyHash as Hex,
-      tokens: [candidate.tokenA as Address, candidate.tokenB as Address],
-    });
-    await logDecision({
-      maker,
-      strategyHash: candidate.strategyHash,
-      pair: candidate.pair,
-      action: "dock",
-      reason: `cron rotation dock (${candidate.verdict})`,
-      txHash: dockTx,
-    });
-    logRotate({ at, maker, strategyHash: candidate.strategyHash, pair: candidate.pair, decision: "docked", reason: `docked ${dockTx.slice(0, 10)} deploying replacement`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, txHash: dockTx, dryRun });
+    const groupToks = [...new Set(group.flatMap((c) => [c.tokenA.toLowerCase(), c.tokenB.toLowerCase()]))];
+    const preBars = await Promise.all(
+      groupToks.map(async (t) => ({ token: t, bal: await tokenBalance(rotClient, t, maker) })),
+    );
+    const docked: string[] = [];
+    for (const c of group) {
+      const dockTx = await dockPosition({
+        maker: maker as Address,
+        aqua: cfg.aqua,
+        app: cfg.app,
+        strategyHash: c.strategyHash as Hex,
+        tokens: [c.tokenA as Address, c.tokenB as Address],
+      });
+      docked.push(c.strategyHash);
+      await logDecision({
+        maker,
+        strategyHash: c.strategyHash,
+        pair: c.pair,
+        action: "dock",
+        reason: `cron rotation dock group ${groupTag} (${c.verdict})`,
+        txHash: dockTx,
+      });
+      logRotate({ at, maker, strategyHash: c.strategyHash, pair: c.pair, decision: "docked", reason: `docked ${dockTx.slice(0, 10)} group ${groupTag}`, verdict: c.verdict, aiLevel: c.aiLevel ?? undefined, txHash: dockTx, dryRun });
+    }
     const dep = await deployReplacement(
       cfg,
-      candidate,
-      { tokenA: candidate.tokenA, tokenB: candidate.tokenB, balA: preA, balB: preB },
-      pairOverride,
+      { ...candidate, tokenA: deployPairs[0].tokenA, tokenB: deployPairs[0].tokenB },
+      preBars,
+      deployPairs,
     );
-    logRotate({ at: new Date().toISOString(), maker, strategyHash: candidate.strategyHash, pair: pairOverride ? `${pairOverride.tokenA.slice(0, 6)}/${pairOverride.tokenB.slice(0, 6)}` : candidate.pair, decision: dep.ok ? "rotated" : "error", reason: dep.jobId ? `${dep.reason} job=${dep.jobId}` : dep.reason, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
+    logRotate({ at: new Date().toISOString(), maker, strategyHash: groupTag, pair: deployLabel, decision: dep.ok ? "rotated" : "error", reason: `${topNote} | ${dep.jobId ? `${dep.reason} job=${dep.jobId}` : dep.reason}`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
+    return dep.ok;
   } catch (e: unknown) {
     const err = e as { shortMessage?: string; message?: string };
     logRotate({ at, maker, strategyHash: candidate.strategyHash, pair: candidate.pair, decision: "error", reason: String(err?.shortMessage ?? err?.message ?? e).slice(0, 200), verdict: candidate.verdict, dryRun });
+    return false;
+  }
+  }
+
+  // Rotate every group: after one group is docked its members are gone from
+  // the candidate set, so the next group forms from the remainder.
+  let remaining = [...candidates];
+  for (let round = 0; round < 5 && remaining.length > 0; round++) {
+    const picked = pickGroup(remaining, cfg.groupMaxSize);
+    if (picked.group.length === 0) break;
+    const progressed = await rotateGroup(picked.group, picked.dominant);
+    remaining = remaining.filter((c) => !picked.group.includes(c));
+    if (!progressed) break;
   }
 }
 

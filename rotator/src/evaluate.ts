@@ -62,7 +62,7 @@ async function getJson(url: string): Promise<unknown> {
 export async function evaluateMaker(
   cfg: RotatorConfig,
   maker: string,
-): Promise<{ candidate: Candidate | null; reason: string; checked: number; outcomes: EvalOutcome[] }> {
+): Promise<{ candidate: Candidate | null; candidates: Candidate[]; reason: string; checked: number; outcomes: EvalOutcome[] }> {
   const [makers, stratBody] = await Promise.all([
     fetchMakers(cfg.webBase),
     getJson(`${cfg.webBase}/api/strategies?maker=${maker}`).catch(() => []),
@@ -71,10 +71,10 @@ export async function evaluateMaker(
     Array.isArray(stratBody) ? (stratBody as Array<{ strategyHash?: string }>) : []
   ).filter((r) => r?.strategyHash);
   if (!makers.some((m) => m.toLowerCase() === maker.toLowerCase())) {
-    return { candidate: null, reason: "not delegated: maker not registered", checked: 0, outcomes: [] };
+    return { candidate: null, candidates: [], reason: "not delegated: maker not registered", checked: 0, outcomes: [] };
   }
   if (rows.length === 0) {
-    return { candidate: null, reason: "kill-switch: no managed rows", checked: 0, outcomes: [] };
+    return { candidate: null, candidates: [], reason: "kill-switch: no managed rows", checked: 0, outcomes: [] };
   }
 
   const sigBody = (await getJson(
@@ -82,7 +82,7 @@ export async function evaluateMaker(
   ).catch(() => ({ signals: [] }))) as { signals?: SignalItem[] };
   const signals = (sigBody?.signals ?? []).filter((s) => s?.strategyHash);
   if (signals.length === 0) {
-    return { candidate: null, reason: "no signals from web", checked: 0, outcomes: [] };
+    return { candidate: null, candidates: [], reason: "no signals from web", checked: 0, outcomes: [] };
   }
 
   const aiLines = signals.map(
@@ -101,6 +101,8 @@ export async function evaluateMaker(
   }
 
   const outcomes: EvalOutcome[] = [];
+  const candidates: Candidate[] = [];
+  let first: { candidate: Candidate; reason: string } | null = null;
   for (const s of signals) {
     const aiLevel = aiNotes.get(s.strategyHash.toLowerCase()) ?? null;
     const signal = describeEligibility({
@@ -122,28 +124,33 @@ export async function evaluateMaker(
       aiLevel,
     });
     if (!signal.eligible) continue;
-    return {
-      candidate: {
-        maker,
-        strategyHash: s.strategyHash,
-        pair: s.pair,
-        symbols: s.symbols,
-        mode: s.mode,
-        verdict: s.verdict,
-        trash: s.trash,
-        trashReason: s.trashReason,
-        aiLevel,
-        gainUsd: typeof s.gainUsd === "number" ? s.gainUsd : 0,
-        gasUsd: cfg.gasUsd,
-        tokenA: s.tokenA,
-        tokenB: s.tokenB,
-      },
-      reason: signal.reasons.join("; "),
-      checked: signals.length,
-      outcomes,
+    const cand: Candidate = {
+      maker,
+      strategyHash: s.strategyHash,
+      pair: s.pair,
+      symbols: s.symbols,
+      mode: s.mode,
+      verdict: s.verdict,
+      trash: s.trash,
+      trashReason: s.trashReason,
+      aiLevel,
+      gainUsd: typeof s.gainUsd === "number" ? s.gainUsd : 0,
+      gasUsd: cfg.gasUsd,
+      tokenA: s.tokenA,
+      tokenB: s.tokenB,
     };
+    candidates.push(cand);
+    if (!first) {
+      first = {
+        candidate: cand,
+        reason: signal.reasons.join("; "),
+      };
+    }
   }
-  return { candidate: null, reason: "no eligible candidate", checked: signals.length, outcomes };
+  if (!first) {
+    return { candidate: null, candidates, reason: "no eligible candidate", checked: signals.length, outcomes };
+  }
+  return { ...first, candidates, checked: signals.length, outcomes };
 }
 
 export async function todayRotationCount(webBase: string, maker: string): Promise<number> {
