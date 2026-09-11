@@ -12,7 +12,8 @@ import {
 import { base } from "viem/chains";
 import { prisma } from "@/lib/prisma";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
-import { AQUA_BASE, aquaHeaders } from "@/lib/aqua-api";
+import { AQUA_BASE, aquaHeaders, pace } from "@/lib/aqua-api";
+import { quoteSwapExact, lastQuoteDiag } from "@/lib/oneinch-quote";
 import { verifyDeployIntent } from "@/lib/deploy-auth";
 import { agentSignAndSubmit, simulateBatch, type CaliburCall } from "@/lib/calibur-agent";
 
@@ -86,20 +87,25 @@ async function usdPrices(
     const v = json[t] ?? json[t.toLowerCase()] ?? null;
     return v !== null && Number(v) > 0 ? Number(v) : null;
   };
-  try {
-    const joined = tokens.join(",");
-    const res = await fetch(
-      `https://api.1inch.com/price/v1.1/8453/${joined}?currency=USD`,
-      { headers: { Authorization: `Bearer ${apiKey}` } },
-    );
-    if (res.ok) {
-      const json = await res.json();
-      for (const t of tokens) out.set(t.toLowerCase(), pick(json, t));
-      if ([...out.values()].every((v) => v === null))
-        throw new Error("empty batch");
-      return out;
-    }
-  } catch {}
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await pace();
+    if (attempt > 0) await sleep(2000 * attempt);
+    try {
+      const joined = tokens.join(",");
+      const res = await fetch(
+        `https://api.1inch.com/price/v1.1/8453/${joined}?currency=USD`,
+        { headers: { Authorization: `Bearer ${apiKey}` } },
+      );
+      if (res.status === 429 || res.status === 502 || res.status === 503) continue;
+      if (res.ok) {
+        const json = await res.json();
+        for (const t of tokens) out.set(t.toLowerCase(), pick(json, t));
+        if ([...out.values()].every((v) => v === null))
+          throw new Error("empty batch");
+        return out;
+      }
+    } catch {}
+  }
   for (const t of tokens) {
     try {
       const res = await fetch(
@@ -186,36 +192,11 @@ async function quoteSwap(
   slippage: number,
   apiKey: string,
 ): Promise<{ to: Address; data: Hex; value: bigint; out: bigint | null }> {
-  const qs = new URLSearchParams({
-    src,
-    dst,
-    amount: amount.toString(),
-    from,
-    slippage: String(slippage),
-  });
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`https://api.1inch.com/swap/v6.1/8453/swap?${qs}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const desc = (err as any)?.description || "";
-      if (/allowance/i.test(desc) && attempt < 4) {
-        await sleep(3000 * (attempt + 1));
-        continue;
-      }
-      throw new Error(desc || `Swap quote failed (${res.status})`);
-    }
-    const json = await res.json();
-    const outRaw =
-      json.toAmount ?? json.dstAmount ?? json.toTokenAmount ?? null;
-    return {
-      to: json.tx.to as Address,
-      data: json.tx.data as Hex,
-      value: BigInt(json.tx.value ?? 0),
-      out: outRaw !== null && outRaw !== undefined ? BigInt(outRaw) : null,
-    };
-  }
+  // Single shared quoter (web/lib/oneinch-quote.ts): deploy and rotator
+  // merge quote identically by construction - pacing, retries, slippage.
+  const q = await quoteSwapExact({ apiKey, src, dst, amount, from, slippage });
+  if (!q) throw new Error(lastQuoteDiag() || "Swap quote failed");
+  return { to: q.to, data: q.data, value: q.value, out: q.dstAmount };
 }
 
 async function quoteOut(
@@ -303,8 +284,10 @@ async function runDeployPipeline(
       };
 
       try {
-        const rpcUrl =
-          process.env.NEXT_PUBLIC_RPC_URL || "https://mainnet.base.org";
+        const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL;
+        if (!rpcUrl) {
+          throw new Error("NEXT_PUBLIC_RPC_URL missing - set your Alchemy RPC URL in web/.env");
+        }
         const publicClient = createPublicClient({
           chain: base,
           transport: http(rpcUrl),
@@ -317,8 +300,30 @@ async function runDeployPipeline(
             functionName: "decimals",
           }),
         );
-        const total = parseUnits(capitalAmount, capDecimals);
+        let total = parseUnits(capitalAmount, capDecimals);
         if (total === 0n) throw new Error("Capital too small to split.");
+        // Clamp to wallet: quotes drift above reality (slippage between the
+        // rotator estimate and execution). Deploy with what is actually
+        // there instead of failing the whole job on dust shortfall.
+        try {
+          const walletCap = (await publicClient.readContract({
+            address: capital as Address,
+            abi: ERC20_MIN,
+            functionName: "balanceOf",
+            args: [maker as Address],
+          })) as bigint;
+          if (walletCap < total) {
+            await pushStep({
+              pair: 0,
+              stage: "budget",
+              detail: `clamped ${formatUnits(total, capDecimals)} -> ${formatUnits(walletCap, capDecimals)} (wallet)`,
+            });
+            total = walletCap;
+            if (total === 0n) throw new Error("Capital too small to split.");
+          }
+        } catch (e) {
+          if ((e as Error)?.message === "Capital too small to split.") throw e;
+        }
 
         const aquaSdk = await import("@1inch/aqua-sdk");
         const vmSdk = await import("@1inch/swap-vm-sdk");
@@ -579,10 +584,18 @@ async function runDeployPipeline(
             unalloc.set(side, have - fromWallet);
             const short = need - fromWallet;
             if (short === 0n) return need;
-            if (side === capLow)
+            if (side === capLow) {
+              // Same dust tolerance as the swap branch: quote/slippage drift
+              // leaves needs a hair above wallet. Below $0.01 deploy with
+              // what is there instead of failing the whole job.
+              const shortUsd =
+                (Number(short) / 10 ** (decMap.get(side) ?? 18)) *
+                (prices.get(side) ?? 0);
+              if (shortUsd < 0.01) return fromWallet;
               throw new Error(
-                `pair ${i + 1}: capital shortfall ${formatUnits(short, decMap.get(side) ?? 18)} - wallet cannot cover`,
+                `pair ${i + 1} (${label}): capital shortfall - need ${formatUnits(need, decMap.get(side) ?? 18)} ${symOf(side)} but wallet has ${formatUnits(have, decMap.get(side) ?? 18)} (short ${formatUnits(short, decMap.get(side) ?? 18)} ~$${shortUsd.toFixed(4)})`,
               );
+            }
             const shortUsd =
               (Number(short) / 10 ** (decMap.get(side) ?? 18)) *
               (prices.get(side) ?? 0);
@@ -594,10 +607,19 @@ async function runDeployPipeline(
             );
             if (inCap === 0n) inCap = 1n;
             const capHave = unalloc.get(capLow) ?? 0n;
-            if (inCap > capHave)
-              throw new Error(
-                `pair ${i + 1}: capital shortfall - need ${formatUnits(inCap, decMap.get(capLow) ?? 18)} more`,
-              );
+            if (inCap > capHave) {
+              // Slippage dust: quoted swap outputs land a hair under plan.
+              // Below $0.01 just deploy slightly less instead of failing.
+              const shortCapUsd =
+                (Number(inCap - capHave) / 10 ** (decMap.get(capLow) ?? 18)) *
+                (capPrice as number);
+              if (shortCapUsd >= 0.01)
+                throw new Error(
+                  `pair ${i + 1} (${label}): capital shortfall - need ${formatUnits(inCap, decMap.get(capLow) ?? 18)} ${symOf(capLow)} for the ${symOf(side)} swap but have ${formatUnits(capHave, decMap.get(capLow) ?? 18)} (short $${shortCapUsd.toFixed(4)})`,
+                );
+              inCap = capHave;
+              if (inCap === 0n) return fromWallet;
+            }
             const q = await quoteSwap(
               capital,
               side,
@@ -850,8 +872,18 @@ async function runDeployPipeline(
           }
           if (batch1.length > 0) {
             const simErr = await simulateBatch(maker as Address, batch1);
-            if (simErr)
-              throw new Error(`batched approve+swap simulation failed (${simErr})`);
+            if (simErr) {
+              // Name the failing leg: simulate each call solo so the error
+              // says WHICH approve/swap reverts instead of "unknown reason".
+              const bad: string[] = [];
+              for (let li = 0; li < batch1.length; li++) {
+                const legErr = await simulateBatch(maker as Address, [batch1[li]]);
+                if (legErr) bad.push(`leg${li}->${batch1[li].to.slice(0, 6)}:${legErr.slice(0, 80)}`);
+              }
+              throw new Error(
+                `batched approve+swap simulation failed (${simErr})${bad.length > 0 ? ` [${bad.join(" | ")}]` : ""}`,
+              );
+            }
             await pushStep({
               pair: 0,
               stage: "swapping",
@@ -869,7 +901,9 @@ async function runDeployPipeline(
             });
             remainingCapIn = 0n;
           }
-          // Measure, then batch 2: every ship in ONE execute.
+          // Measure, then batch 2: every ship in ONE execute. Clamp needs to
+          // measured post-swap balances: quotes drift above reality and a
+          // ship pulling even dust more than present reverts the batch.
           const shipPlans: typeof plans = [];
           for (const plan of plans) {
             const i = plan.idx;
@@ -882,6 +916,28 @@ async function runDeployPipeline(
                 detail: "swaps yielded nothing - skipping ship",
               });
               continue;
+            }
+            if (plan.needA > postA || plan.needB > postB) {
+              await pushStep({
+                pair: i,
+                stage: "clamped",
+                detail: `ship needs clamped to measured: ${formatUnits(plan.needA, plan.decA)}+${formatUnits(plan.needB, plan.decB)} -> ${formatUnits(postA < plan.needA ? postA : plan.needA, plan.decA)}+${formatUnits(postB < plan.needB ? postB : plan.needB, plan.decB)}`,
+              });
+              plan.needA = postA < plan.needA ? postA : plan.needA;
+              plan.needB = postB < plan.needB ? postB : plan.needB;
+              const shipTx = (aqua as unknown as { ship: (args: unknown) => { to: Address; data: Hex; value: bigint } }).ship({
+                app: toAddr(AQUA_ROUTER),
+                strategy: toHex(plan.strategy?.toString?.() ?? plan.strategy),
+                amountsAndTokens: [
+                  { token: toAddr(plan.tokenA), amount: plan.needA },
+                  { token: toAddr(plan.tokenB), amount: plan.needB },
+                ],
+              });
+              (plan as unknown as { shipCall: CaliburCall }).shipCall = {
+                to: shipTx.to as Address,
+                value: BigInt(shipTx.value ?? 0),
+                data: shipTx.data as Hex,
+              };
             }
             if (plan.range) {
               await pushStep({
