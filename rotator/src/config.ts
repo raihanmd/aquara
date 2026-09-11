@@ -17,7 +17,9 @@ export interface RotatorConfig {
   groupMaxSize: number;
   topMaxPairs: number;
   topMinRatio: number;
+  topMode: "apy" | "scored";
   dailyGasCapUsd: number;
+  minCapitalUsd: number;
   intervalMs: number;
   port: number;
   live: boolean;
@@ -41,7 +43,11 @@ export function loadConfig(): RotatorConfig {
   }
   return {
     webBase: (process.env.ROT_WEB_BASE || "http://localhost:3000").replace(/\/$/, ""),
-    rpcUrl: process.env.ROT_RPC_URL || "https://mainnet.base.org",
+    rpcUrl: (() => {
+      const u = process.env.ROT_RPC_URL;
+      if (!u) throw new Error("ROT_RPC_URL missing - set your Alchemy RPC URL in rotator/.env");
+      return u;
+    })(),
     aqua: (process.env.ROT_AQUA ||
       "0x1111113ccf1426a8e30e2bff5e005d929bf6a90a") as `0x${string}`,
     app: (process.env.ROT_APP ||
@@ -58,12 +64,14 @@ export function loadConfig(): RotatorConfig {
     gasUsd: num("ROT_GAS_USD", 0.08),
     groupMaxSize: num("ROT_GROUP_MAX_SIZE", 3),
     topMaxPairs: num("ROT_TOP_MAX_PAIRS", 3),
+    topMode: process.env.ROT_TOP_MODE === "scored" ? "scored" : "apy",
     topMinRatio: (() => {
       const v = Number(process.env.ROT_TOP_MIN_RATIO);
       return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.5;
     })(),
     maxPerDay: num("ROT_MAX_PER_DAY", 1),
     dailyGasCapUsd: num("ROT_DAILY_GAS_CAP_USD", 1.0),
+    minCapitalUsd: num("ROT_MIN_CAPITAL_USD", 0.05),
     intervalMs: num("ROT_INTERVAL_MS", 900000),
     port: num("ROT_PORT", 3102),
     live: (process.env.ROT_LIVE || "false").toLowerCase() === "true",

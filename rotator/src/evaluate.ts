@@ -39,6 +39,8 @@ export interface Candidate {
   gasUsd: number;
   tokenA: string;
   tokenB: string;
+  balA: string;
+  balB: string;
 }
 
 export interface EvalOutcome {
@@ -138,6 +140,8 @@ export async function evaluateMaker(
       gasUsd: cfg.gasUsd,
       tokenA: s.tokenA,
       tokenB: s.tokenB,
+      balA: s.balA,
+      balB: s.balB,
     };
     candidates.push(cand);
     if (!first) {

@@ -4,7 +4,7 @@ import { agentSignAndSubmit } from "../../web/lib/calibur-agent.ts";
 import type { RotatorConfig } from "./config.ts";
 import type { Candidate } from "./evaluate.ts";
 
-const ERC20_MIN = [
+export const ERC20_MIN = [
   {
     name: "decimals",
     type: "function",
@@ -44,7 +44,7 @@ export interface DeployResult {
   reason: string;
 }
 
-async function tokenPriceUsd(oneinchKey: string, token: string): Promise<number | null> {
+export async function tokenPriceUsd(oneinchKey: string, token: string): Promise<number | null> {
   if (!oneinchKey) return null;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500 * attempt));
@@ -81,34 +81,82 @@ export async function pickPricedCapital(
   return null;
 }
 
-async function swapQuote(
-  oneinchKey: string,
-  src: string,
-  dst: string,
-  amount: bigint,
-  from: string,
-): Promise<{ to: Address; data: Hex; value: bigint } | null> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
-    try {
-      const qs = new URLSearchParams({ src, dst, amount: amount.toString(), from, slippage: "0.5" });
-      const res = await fetch(`https://api.1inch.com/swap/v6.1/8453/swap?${qs}`, {
-        headers: { Authorization: `Bearer ${oneinchKey}` },
-      });
-      if (res.status === 502 || res.status === 503 || res.status === 429) continue;
-      if (!res.ok) return null;
-      const json = (await res.json()) as { tx?: { to?: string; data?: string; value?: string } };
-      if (!json?.tx?.to || !json?.tx?.data) return null;
-      return { to: json.tx.to as Address, data: json.tx.data as Hex, value: BigInt(json.tx.value ?? 0) };
-    } catch {
-      // retry
-    }
-  }
-  return null;
-}
+import { quoteSwapExact, quoteOnly, lastQuoteDiag } from "../../web/lib/oneinch-quote.ts";
 
 export function clientFor(rpcUrl: string) {
   return createPublicClient({ chain: base, transport: http(rpcUrl) });
+}
+
+const STABLES = [
+  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+  "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42",
+];
+
+export async function selectCapital(
+  cfg: RotatorConfig,
+  deployPairs: Array<{ tokenA: string; tokenB: string }>,
+): Promise<string> {
+  const pairToks = [...new Set(deployPairs.flatMap((p) => [p.tokenA.toLowerCase(), p.tokenB.toLowerCase()]))];
+  const stable = STABLES.find((s) => pairToks.includes(s));
+  if (stable) return stable;
+  for (const t of pairToks) {
+    if ((await pickPricedCapital(cfg.oneinchKey, t, t)) !== null) return t;
+  }
+  return deployPairs[0].tokenA;
+}
+
+/**
+ * Allowance-free preflight: the /quote endpoint needs no approval, so route
+ * existence is proven BEFORE the dock spends gas. Returns legs or an error.
+ */
+export async function preflightSwaps(
+  cfg: RotatorConfig,
+  funds: Array<{ token: string; amount: bigint }>,
+  capital: string,
+  from: string,
+): Promise<{ ok: true; legs: Array<{ token: string; amount: bigint; out: bigint }> } | { ok: false; reason: string }> {
+  const legs: Array<{ token: string; amount: bigint; out: bigint }> = [];
+  for (const f of funds) {
+    if (f.token.toLowerCase() === capital.toLowerCase() || f.amount === 0n) continue;
+    const q = await quoteOnly({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: f.amount });
+    if (!q || q.dstAmount === 0n)
+      return { ok: false, reason: `no swap route ${f.token.slice(0, 6)}->${capital.slice(0, 6)} (${f.amount} raw) [${lastQuoteDiag()}] - skipping before dock, no gas spent` };
+    legs.push({ token: f.token, amount: f.amount, out: q.dstAmount });
+  }
+  return { ok: true, legs };
+}
+
+/**
+ * One batched approve tx for every token missing V6 allowance. The /swap
+ * endpoint refuses to quote without allowance, so approvals land BEFORE any
+ * swap data is fetched. One-time per token, reusable forever.
+ */
+export async function ensureAllowances(
+  cfg: RotatorConfig,
+  maker: string,
+  tokens: Array<{ token: string; amount: bigint }>,
+): Promise<{ ok: boolean; reason: string }> {
+  const client = clientFor(cfg.rpcUrl);
+  const calls: Array<{ to: Address; value: bigint; data: Hex }> = [];
+  for (const t of tokens) {
+    const alw = (await client.readContract({
+      address: t.token as Address, abi: ERC20_MIN, functionName: "allowance", args: [maker as Address, V6_ROUTER],
+    }).catch(() => 0n)) as bigint;
+    if (alw < t.amount) {
+      calls.push({
+        to: t.token as Address,
+        value: 0n,
+        data: encodeFunctionData({ abi: ERC20_MIN, functionName: "approve", args: [V6_ROUTER, MAX_UINT] }),
+      });
+    }
+  }
+  if (calls.length === 0) return { ok: true, reason: "allowances already set" };
+  try {
+    await agentSignAndSubmit(maker as Address, calls);
+    return { ok: true, reason: `approved ${calls.length} token(s) for swaps` };
+  } catch (e: unknown) {
+    return { ok: false, reason: `approve tx failed: ${String((e as Error)?.message ?? e).slice(0, 150)}` };
+  }
 }
 
 export async function tokenBalance(
@@ -122,99 +170,88 @@ export async function tokenBalance(
 }
 
 /**
- * Merge the minor proceeds side into the capital token so the redeploy ships
- * the full docked amount, not just one side. Skips dust (<= $0.005) where
- * swap gas exceeds the value. Uses the agent key (approve + swap batched in
- * one Calibur execute). Amounts are explicit dock deltas, never wallet reads.
+ * Merge every non-capital snapshot fund into capital BEFORE /deploy, so the
+ * deploy call sees the same pure-capital wallet a user has after manual
+ * swaps. Received amounts are MEASURED (wallet deltas per swap), never
+ * quoted estimates, so the deploy budget cannot drift. A failed leg aborts
+ * the group with funds safe in the wallet (already-merged legs stay merged).
  */
-async function consolidateProceeds(
+export async function mergeFundsToCapital(
   cfg: RotatorConfig,
-  maker: Address,
+  maker: string,
+  funds: Array<{ token: string; amount: bigint }>,
   capital: string,
-  other: string,
-  otherAmount: bigint,
-  client: ReturnType<typeof clientFor>,
-): Promise<{ consolidated: boolean; reason: string }> {
-  if (otherAmount === 0n) return { consolidated: false, reason: "nothing to consolidate" };
-  const [decO, priceO] = await Promise.all([
-    client.readContract({ address: other as Address, abi: ERC20_MIN, functionName: "decimals" }) as Promise<number>,
-    tokenPriceUsd(cfg.oneinchKey, other),
-  ]);
-  const usdO = priceO !== null ? (Number(otherAmount) / 10 ** decO) * priceO : null;
-  if (usdO === null) return { consolidated: false, reason: "no USD price for minor side" };
-  if (usdO <= 0.005) return { consolidated: false, reason: `minor side dust $${usdO.toFixed(4)}, skipping swap` };
-  if (!cfg.live || !cfg.relayerKey) return { consolidated: false, reason: "dry-run: would consolidate" };
-  const q = await swapQuote(cfg.oneinchKey, other, capital, otherAmount, maker);
-  if (!q) return { consolidated: false, reason: "no swap route for consolidation" };
-  const calls: Array<{ to: Address; value: bigint; data: Hex }> = [];
-  const alw = (await client.readContract({
-    address: other as Address, abi: ERC20_MIN, functionName: "allowance", args: [maker, V6_ROUTER],
-  })) as bigint;
-  if (alw < otherAmount) {
-    calls.push({
-      to: other as Address,
-      value: 0n,
-      data: encodeFunctionData({ abi: ERC20_MIN, functionName: "approve", args: [V6_ROUTER, MAX_UINT] }),
-    });
+  slippage = 0.5,
+): Promise<{ ok: true; swappedIn: bigint; detail: string } | { ok: false; reason: string }> {
+  const client = clientFor(cfg.rpcUrl);
+  const isCap = (t: string) => t.toLowerCase() === capital.toLowerCase();
+  const capBase = await tokenBalance(client, capital, maker).catch(() => 0n);
+  let swappedIn = 0n;
+  const done: string[] = [];
+  for (const f of funds) {
+    if (isCap(f.token) || f.amount === 0n) continue;
+    const wallet = await tokenBalance(client, f.token, maker).catch(() => 0n);
+    const spend = f.amount < wallet ? f.amount : wallet;
+    if (spend === 0n) continue;
+    // Same shared quoter as /deploy: identical pacing, retries, slippage.
+    const q = await quoteSwapExact({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: spend, from: maker, slippage });
+    if (!q || q.dstAmount === 0n)
+      return { ok: false, reason: `no swap route ${f.token.slice(0, 6)}->${capital.slice(0, 6)} (${spend} raw) [${lastQuoteDiag()}] - merged so far stays in wallet` };
+    const alw = (await client.readContract({
+      address: f.token as Address, abi: ERC20_MIN, functionName: "allowance", args: [maker as Address, V6_ROUTER],
+    }).catch(() => 0n)) as bigint;
+    const approveCall: { to: Address; value: bigint; data: Hex } | null =
+      alw < spend
+        ? {
+            to: f.token as Address,
+            value: 0n,
+            data: encodeFunctionData({ abi: ERC20_MIN, functionName: "approve", args: [V6_ROUTER, MAX_UINT] }),
+          }
+        : null;
+    const swapCall = { to: q.to, value: q.value, data: q.data };
+    // Per-leg sims name the failing call before any gas is spent (deploy
+    // parity: deploy sims each leg solo for the same reason).
+    const { simulateBatch } = await import("../../web/lib/calibur-agent.ts");
+    if (approveCall) {
+      const ae = await simulateBatch(maker as Address, [approveCall]);
+      if (ae)
+        return { ok: false, reason: `merge approve would revert ${f.token.slice(0, 6)} (${ae.slice(0, 100)}) - nothing sent, funds stay put` };
+    }
+    const se = await simulateBatch(maker as Address, [swapCall]);
+    if (se)
+      return { ok: false, reason: `merge swap would revert ${f.token.slice(0, 6)}->${capital.slice(0, 6)} (${se.slice(0, 100)}) - nothing sent, funds stay put` };
+    const calls: Array<{ to: Address; value: bigint; data: Hex }> = [...(approveCall ? [approveCall] : []), swapCall];
+    try {
+      await agentSignAndSubmit(maker as Address, calls);
+    } catch (e: unknown) {
+      return { ok: false, reason: `merge swap failed ${f.token.slice(0, 6)}->${capital.slice(0, 6)}: ${String((e as Error)?.message ?? e).slice(0, 120)} - merged so far stays in wallet` };
+    }
+    const capNow = await tokenBalance(client, capital, maker).catch(() => capBase + swappedIn);
+    const got = capNow > capBase + swappedIn ? capNow - (capBase + swappedIn) : 0n;
+    swappedIn += got;
+    // Per-leg receive check vs quote: flags short fills loudly. No abort
+    // here by design - funds already moved, and deploying the measured
+    // amount is always safer than stranding merged capital.
+    const shortPct = q.dstAmount > 0n ? Number((q.dstAmount - got) * 10000n / q.dstAmount) / 100 : 0;
+    done.push(`${f.token.slice(0, 6)}->${capital.slice(0, 6)} +${got} (quoted ${q.dstAmount}${shortPct > 2 ? ` SHORT ${shortPct.toFixed(1)}%` : ""})`);
   }
-  calls.push({ to: q.to, value: q.value, data: q.data });
-  await agentSignAndSubmit(maker, calls);
-  return { consolidated: true, reason: `consolidated $${usdO.toFixed(4)} into capital` };
+  return { ok: true, swappedIn, detail: done.join(", ") || "already pure capital" };
 }
 
-/**
- * Redeploy DOCK PROCEEDS (explicit pre/post-dock deltas) into the replacement
- * pair. Never reads wallet balances as capital: the wallet may hold unrelated
- * funds, and deploying those instead of the proceeds silently shrinks or
- * misallocates the rotation.
- */
-export interface PreDockBaseline {
-  token: string;
-  bal: bigint;
-}
-
-export async function deployReplacement(
+export async function postDeploy(
   cfg: RotatorConfig,
   c: Candidate,
-  pre: PreDockBaseline[],
+  capital: string,
+  capitalAmount: string,
   deployPairs: Array<{ tokenA: string; tokenB: string }>,
 ): Promise<DeployResult> {
-  const client = clientFor(cfg.rpcUrl);
-  const pairToks = [...new Set(deployPairs.flatMap((p) => [p.tokenA.toLowerCase(), p.tokenB.toLowerCase()]))];
-  let capital = deployPairs[0].tokenA;
-  for (const t of pairToks) {
-    if ((await pickPricedCapital(cfg.oneinchKey, t, t)) !== null) {
-      capital = t;
-      break;
-    }
-  }
-  // Consolidate every non-capital proceeds token into capital so the ladder
-  // ships the full pooled amount. Baselines are pre-dock reads; deltas are
-  // proceeds, which excludes pre-existing wallet funds.
-  const preMap = new Map(pre.map((p) => [p.token.toLowerCase(), p.bal]));
-  let consolidated = false;
-  for (const p of pre) {
-    if (p.token.toLowerCase() === capital.toLowerCase()) continue;
-    const post = await tokenBalance(client, p.token, c.maker);
-    const delta = post > p.bal ? post - p.bal : 0n;
-    if (delta === 0n) continue;
-    const con = await consolidateProceeds(cfg, c.maker as Address, capital, p.token, delta, client);
-    consolidated = consolidated || con.consolidated;
-  }
-  const decC = (await client.readContract({
-    address: capital as Address, abi: ERC20_MIN, functionName: "decimals",
-  })) as number;
-  const capPre = preMap.get(capital.toLowerCase()) ?? 0n;
-  const capPost = await tokenBalance(client, capital, c.maker);
-  const amount = capPost > capPre ? capPost - capPre : 0n;
-  if (amount === 0n) return { ok: false, reason: "dock proceeds are zero" };
   const res = await fetch(`${cfg.webBase}/api/agent/deploy`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-cron-key": cfg.cronKey },
     body: JSON.stringify({
       maker: c.maker,
       capital,
-      capitalAmount: formatUnits(amount, decC),
+      capitalAmount,
       pairs: deployPairs.map((p) => ({ tokenA: p.tokenA, tokenB: p.tokenB })),
       execution: "batched",
       mode: "aggressive",
@@ -259,6 +296,6 @@ export async function deployReplacement(
     return { ok: false, jobId, reason: `deploy stream broke: ${String((e as Error)?.message ?? e).slice(0, 120)}` };
   }
   if (err) return { ok: false, jobId, reason: `deploy failed: ${err.slice(0, 200)}` };
-  if (ok > 0) return { ok: true, jobId, reason: `deployed ${ok}/${total}${con.consolidated ? ` (${con.reason})` : ""}${jobId ? ` job=${jobId}` : ""}` };
+  if (ok > 0) return { ok: true, jobId, reason: `deployed ${ok}/${total}${jobId ? ` job=${jobId}` : ""}` };
   return { ok: false, jobId, reason: `deploy yielded nothing (0/${total})` };
 }

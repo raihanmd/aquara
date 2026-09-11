@@ -43,7 +43,7 @@ function sig(
   return {
     strategyHash: H(n),
     eligible,
-    headline: eligible ? "Not ideal — better to rotate" : "Healthy",
+    headline: eligible ? "Not ideal - better to rotate" : "Healthy",
     reasons: eligible ? ["Out of range"] : ["In range and fillable"],
     verdict,
     trash: eligible,
