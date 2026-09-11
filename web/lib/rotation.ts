@@ -7,6 +7,7 @@ export type Verdict =
   | "side-depleted"
   | "oor-suspect"
   | "thin-allowance"
+  | "inactive"
   | "unreadable";
 
 export type TrashReason =
@@ -36,6 +37,10 @@ export interface TrashThresholds {
   trashMinFeeRatio: number | null;
   /** Minimum position age in hours before efficiency rules apply. */
   trashEffMinAgeHours: number;
+  /** Gas USD used by the gain gate. Zero-allowed for demos. */
+  gainGasUsd: number;
+  /** Minimum gain multiple of gas (bps) for the gain gate. Zero-allowed for demos. */
+  gainMinBps: number;
 }
 
 export const DEFAULT_TRASH: TrashThresholds = {
@@ -49,6 +54,8 @@ export const DEFAULT_TRASH: TrashThresholds = {
   trashMinVolumeRatio: 0.05,
   trashMinFeeRatio: 0.001,
   trashEffMinAgeHours: 6,
+  gainGasUsd: 0.08,
+  gainMinBps: 20000,
 };
 
 export function decideVerdict(args: {
@@ -58,13 +65,44 @@ export function decideVerdict(args: {
   quoteOk: boolean;
   allowanceOk: boolean;
   infraDegraded: boolean;
+  /**
+   * Dead-on-arrival: every side untouched since deploy (current == initial,
+   * at least one side funded) with zero lifetime volume and fees. The pool
+   * quote probe cannot prove range (it fills whenever the pool is liquid),
+   * so a position the market never touched past grace is dead capital
+   * regardless of what the quote says.
+   */
+  untouched?: boolean;
+  lifetimeVolumeUsd?: number | null;
+  lifetimeFeesUsd?: number | null;
+  ageHours?: number | null;
+  graceHours?: number;
 }): Verdict {
-  const { balA, balB, sideDepleted, quoteOk, allowanceOk, infraDegraded } =
-    args;
+  const {
+    balA,
+    balB,
+    sideDepleted,
+    quoteOk,
+    allowanceOk,
+    infraDegraded,
+    untouched = false,
+    lifetimeVolumeUsd = null,
+    lifetimeFeesUsd = null,
+    ageHours = null,
+    graceHours = 0,
+  } = args;
   if (infraDegraded) return "unreadable";
   if (balA < 0n || balB < 0n) return "unreadable";
   if (balA === 0n && balB === 0n) return "depleted";
   if (sideDepleted) return "side-depleted";
+  if (
+    untouched &&
+    lifetimeVolumeUsd === 0 &&
+    lifetimeFeesUsd === 0 &&
+    ageHours !== null &&
+    ageHours >= graceHours
+  )
+    return "inactive";
   if (!quoteOk) return "oor-suspect";
   if (!allowanceOk) return "thin-allowance";
   return "healthy";
@@ -176,6 +214,7 @@ export function isRotationCandidate(
     verdict === "oor-suspect" ||
     verdict === "depleted" ||
     verdict === "side-depleted" ||
+    verdict === "inactive" ||
     trash
   );
 }
@@ -221,19 +260,21 @@ export function describeEligibility(args: {
   const reasons: string[] = [];
 
   if (verdict === "healthy") reasons.push("In range and fillable");
-  if (verdict === "depleted") reasons.push("Empty — capital sits idle");
+  if (verdict === "depleted") reasons.push("Empty - capital sits idle");
   if (verdict === "side-depleted") reasons.push("One side drained to zero");
-  if (verdict === "oor-suspect") reasons.push("Out of range — quote reverted");
+  if (verdict === "oor-suspect") reasons.push("Out of range - price outside band");
   if (verdict === "thin-allowance")
     reasons.push("Fillable, but Aqua allowance too low");
-  if (verdict === "unreadable") reasons.push("Chain reads failed — cannot judge");
+  if (verdict === "inactive")
+    reasons.push("Never filled since deploy - zero lifetime volume and fees");
+  if (verdict === "unreadable") reasons.push("Chain reads failed - cannot judge");
   if (trash && trashReason) reasons.push(`Trash: ${TRASH_TEXT[trashReason]}`);
 
   const candidate = isRotationCandidate(verdict, trash);
   if (!candidate) {
     return {
       eligible: false,
-      headline: "Healthy — compounding in place",
+      headline: "Healthy - compounding in place",
       reasons,
       verdict,
       trash,
@@ -247,7 +288,8 @@ export function describeEligibility(args: {
   const deadCapital =
     verdict === "oor-suspect" ||
     verdict === "depleted" ||
-    verdict === "side-depleted";
+    verdict === "side-depleted" ||
+    verdict === "inactive";
   if (!deadCapital) {
     const { pass: gainPass, bps } = passesGainGate(gainUsd, gasUsd, minBps);
     if (!gainPass) {
@@ -256,7 +298,7 @@ export function describeEligibility(args: {
       );
       return {
         eligible: false,
-        headline: "Not ideal — gain too small to rotate",
+        headline: "Not ideal - gain too small to rotate",
         reasons,
         verdict,
         trash,
@@ -264,7 +306,7 @@ export function describeEligibility(args: {
       };
     }
   } else {
-    reasons.push("Dead capital — rotation frees the funds");
+    reasons.push("Dead capital - rotation frees the funds");
   }
   // AI advises only on judgment calls (healthy/trash positions). Dead capital
   // is proven deterministically (price band, empty balances), so a flaky or
@@ -276,7 +318,7 @@ export function describeEligibility(args: {
     );
     return {
       eligible: false,
-      headline: "Not ideal — awaiting AI review",
+      headline: "Not ideal - awaiting AI review",
       reasons,
       verdict,
       trash,
@@ -293,7 +335,7 @@ export function describeEligibility(args: {
   );
   return {
     eligible: true,
-    headline: "Not ideal — better to rotate",
+    headline: "Not ideal - better to rotate",
     reasons,
     verdict,
     trash,
@@ -353,8 +395,15 @@ export function isPriceOutOfRange(args: {
   priceMin?: string | null;
   priceMax?: string | null;
   tokens: PriceCheckToken[];
+  /**
+   * USD per whole token, e.g. from the price API. Required for single-sided
+   * positions: a side with raw balance zero reports usd zero, so usdPerRaw
+   * on position balances alone can never price them.
+   */
+  usdA?: number | null;
+  usdB?: number | null;
 }): boolean | null {
-  const { tokenA, tokenB, decA, decB, priceMin, priceMax, tokens } = args;
+  const { tokenA, tokenB, decA, decB, priceMin, priceMax, tokens, usdA, usdB } = args;
   if (
     decA === undefined ||
     decB === undefined ||
@@ -365,8 +414,14 @@ export function isPriceOutOfRange(args: {
   ) {
     return null;
   }
-  const rateA = usdPerRaw(tokens, tokenA);
-  const rateB = usdPerRaw(tokens, tokenB);
+  const rateA =
+    typeof usdA === "number" && usdA > 0
+      ? usdA / 10 ** (decA as number)
+      : usdPerRaw(tokens, tokenA);
+  const rateB =
+    typeof usdB === "number" && usdB > 0
+      ? usdB / 10 ** (decB as number)
+      : usdPerRaw(tokens, tokenB);
   if (rateA === null || rateB === null || rateA <= 0 || rateB <= 0) return null;
   let min: bigint;
   let max: bigint;
@@ -488,7 +543,7 @@ export function passesGainGate(
   return { pass: bps >= minBps, bps };
 }
 
-const AI_PROMPT = `You classify Aqua liquidity position rotation urgency. Input lines look like: <strategyHash> <pair> <verdict> balA=<raw> balB=<raw> trash=<true|false>. Verdict meanings: healthy=in range and fillable; depleted=both balances zero; side-depleted=one side drained to zero; oor-suspect=out of range, quote reverted; thin-allowance=fillable but Aqua allowance too low; unreadable=chain read failed. Decide level by these rules in order: unreadable=>LOW; depleted=>HIGH; side-depleted=>HIGH; oor-suspect=>HIGH; trash=true=>HIGH; thin-allowance=>MEDIUM; healthy=>LOW. Reply ONLY a JSON array, no other text: [{"hash":"<full 66-char strategyHash exactly as in input>","level":"LOW|MEDIUM|HIGH"}]. Copy each hash exactly, never truncate. Reply with minified single-line JSON: no markdown fences, no spaces, no newlines.`;
+const AI_PROMPT = `You classify Aqua liquidity position rotation urgency. Input lines look like: <strategyHash> <pair> <verdict> balA=<raw> balB=<raw> trash=<true|false>. Verdict meanings: healthy=in range and fillable; depleted=both balances zero; side-depleted=one side drained to zero; oor-suspect=out of range, quote reverted; thin-allowance=fillable but Aqua allowance too low; inactive=never filled since deploy, zero lifetime volume/fees; unreadable=chain read failed. Decide level by these rules in order: unreadable=>LOW; depleted=>HIGH; side-depleted=>HIGH; oor-suspect=>HIGH; inactive=>HIGH; trash=true=>HIGH; thin-allowance=>MEDIUM; healthy=>LOW. Reply ONLY a JSON array, no other text: [{"hash":"<full 66-char strategyHash exactly as in input>","level":"LOW|MEDIUM|HIGH"}]. Copy each hash exactly, never truncate. Reply with minified single-line JSON: no markdown fences, no spaces, no newlines.`;
 
 export function buildAiPrompt(lines: string[]): string {
   return `${AI_PROMPT}\n${lines.join("\n")}`;

@@ -50,6 +50,26 @@ describe("decideVerdict", () => {
   test("thin allowance last", () => {
     expect(decideVerdict({ ...base, allowanceOk: false })).toBe("thin-allowance");
   });
+  test("untouched with zero lifetime volume/fees past grace is inactive", () => {
+    expect(
+      decideVerdict({ ...base, untouched: true, lifetimeVolumeUsd: 0, lifetimeFeesUsd: 0, ageHours: 7, graceHours: 6 }),
+    ).toBe("inactive");
+  });
+  test("inactive beats quote-ok and allowance-ok", () => {
+    expect(
+      decideVerdict({ ...base, balB: 0n, untouched: true, lifetimeVolumeUsd: 0, lifetimeFeesUsd: 0, ageHours: 1, graceHours: 0 }),
+    ).toBe("inactive");
+  });
+  test("fresh untouched inside grace stays healthy", () => {
+    expect(
+      decideVerdict({ ...base, untouched: true, lifetimeVolumeUsd: 0, lifetimeFeesUsd: 0, ageHours: 1, graceHours: 6 }),
+    ).toBe("healthy");
+  });
+  test("touched balances never inactive", () => {
+    expect(
+      decideVerdict({ ...base, untouched: false, lifetimeVolumeUsd: 0, lifetimeFeesUsd: 0, ageHours: 99, graceHours: 0 }),
+    ).toBe("healthy");
+  });
 });
 
 // ── trash ───────────────────────────────────────────────────────
@@ -86,6 +106,17 @@ describe("decideTrash", () => {
     expect(decideTrash({ ...base, volume24h: 0, volume7d: 0 }).reason).toBe(
       "zero-volume-both-windows",
     );
+  });
+  test("zero grace means no waiting even for minutes-old positions", () => {
+    expect(
+      decideTrash({
+        ...base,
+        volume24h: 0,
+        volume7d: 0,
+        ageHours: 0.05,
+        thresholds: { ...DEFAULT_TRASH, trashGraceHours: 0 },
+      }).reason,
+    ).toBe("zero-volume-both-windows");
   });
   test("low absolute volume is trash", () => {
     expect(decideTrash({ ...base, volume24h: 0.01 }).reason).toBe("low-volume-24h");
@@ -226,6 +257,21 @@ describe("isPriceOutOfRange", () => {
   test("far-off band returns true", () => {
     expect(
       isPriceOutOfRange({ tokenA: T.usdc, tokenB: T.weth, decA: 6, decB: 18, priceMin: "99999999999999999999999999999999999999", priceMax: "99999999999999999999999999999999999999999", tokens: toks }),
+    ).toBe(true);
+  });
+  test("single-sided (zero side) prices from usdA/usdB instead of null", () => {
+    const single = [
+      { address: T.usdc, decimals: 6, currentBalance: { raw: "853781", usd: 0.989337 } },
+      { address: T.weth, decimals: 18, currentBalance: { raw: "0", usd: 0 } },
+    ];
+    expect(
+      isPriceOutOfRange({ tokenA: T.usdc, tokenB: T.weth, decA: 6, decB: 18, priceMin: "1", priceMax: "99999999999999999999999999999999999999", tokens: single }),
+    ).toBe(null);
+    expect(
+      isPriceOutOfRange({ tokenA: T.usdc, tokenB: T.weth, decA: 6, decB: 18, priceMin: "1", priceMax: "99999999999999999999999999999999999999", tokens: single, usdA: 1, usdB: 3000 }),
+    ).toBe(false);
+    expect(
+      isPriceOutOfRange({ tokenA: T.usdc, tokenB: T.weth, decA: 6, decB: 18, priceMin: "99999999999999999999999999999999999999", priceMax: "99999999999999999999999999999999999999999", tokens: single, usdA: 1, usdB: 3000 }),
     ).toBe(true);
   });
 });

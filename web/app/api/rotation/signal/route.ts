@@ -32,6 +32,7 @@ export const dynamic = "force-dynamic";
 
 let topApyCache: number | null = null;
 let topApyCachedAt = 0;
+let spotCache: { addrs: string[]; prices: Map<string, number | null>; at: number } = { addrs: [], prices: new Map(), at: 0 };
 
 // Trash thresholds resolve from server env so demos can tune without code
 // changes. Unset/invalid values fall back to DEFAULT_TRASH. Rotator uses the
@@ -48,6 +49,12 @@ function resolveThresholds(): typeof DEFAULT_TRASH {
     const v = Number(raw);
     return Number.isFinite(v) && v > 0 ? v : fallback;
   };
+  const zeroAllowed = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") return fallback;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= 0 ? v : fallback;
+  };
   const bool = (name: string, fallback: boolean): boolean => {
     const v = process.env[name];
     if (v === undefined) return fallback;
@@ -62,11 +69,13 @@ function resolveThresholds(): typeof DEFAULT_TRASH {
       .map((s) => s.trim().toLowerCase())
       .filter((s) => /^0x[a-f0-9]{64}$/.test(s)),
     demoTrashAllAggressive: bool("TRASH_ALL", false),
-    trashGraceHours: num("TRASH_GRACE_HOURS", DEFAULT_TRASH.trashGraceHours),
+    trashGraceHours: zeroAllowed("TRASH_GRACE_HOURS", DEFAULT_TRASH.trashGraceHours),
     trashApyVsTopFactor: ratioOrNull("TRASH_APY_VS_TOP", DEFAULT_TRASH.trashApyVsTopFactor),
     trashMinVolumeRatio: ratioOrNull("TRASH_MIN_VOLUME_RATIO", DEFAULT_TRASH.trashMinVolumeRatio),
     trashMinFeeRatio: ratioOrNull("TRASH_MIN_FEE_RATIO", DEFAULT_TRASH.trashMinFeeRatio),
-    trashEffMinAgeHours: num("TRASH_EFF_MIN_AGE_H", DEFAULT_TRASH.trashEffMinAgeHours),
+    trashEffMinAgeHours: zeroAllowed("TRASH_EFF_MIN_AGE_H", DEFAULT_TRASH.trashEffMinAgeHours),
+    gainGasUsd: zeroAllowed("TRASH_GAS_USD", DEFAULT_TRASH.gainGasUsd),
+    gainMinBps: zeroAllowed("TRASH_MIN_GAIN_BPS", DEFAULT_TRASH.gainMinBps),
   };
 }
 
@@ -88,7 +97,10 @@ export async function GET(req: Request) {
   if (!maker || !/^0x[a-fA-F0-9]{40}$/.test(maker)) {
     return Response.json({ error: "maker required" }, { status: 400 });
   }
-  const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL || "https://mainnet.base.org";
+  const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL;
+  if (!rpcUrl) {
+    return Response.json({ error: "NEXT_PUBLIC_RPC_URL missing - set your Alchemy RPC URL in web/.env" }, { status: 500 });
+  }
   const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
 
   const rows = await prisma.managedStrategy.findMany({
@@ -103,6 +115,36 @@ export async function GET(req: Request) {
   const liveItems = apiKey
     ? await fetchMakerPositions(maker, apiKey, 20).catch(() => [])
     : [];
+  // Spot USD per token for the price-OOR check. Position balances alone
+  // cannot price single-sided positions (empty side reports usd zero).
+  // One batched call per route run, cached 5 minutes.
+  const spotAddrs = [...new Set(
+    (liveItems as Array<{ tokens?: Array<{ address?: string }> }>).flatMap((p) =>
+      (p.tokens ?? []).slice(0, 2).map((t) => String(t.address ?? "").toLowerCase()),
+    ).filter((a) => /^0x[a-f0-9]{40}$/.test(a)),
+  )];
+  let spotUsd = new Map<string, number | null>();
+  if (apiKey && spotAddrs.length > 0) {
+    const cached = spotCache.addrs.join(",") === spotAddrs.join(",") && Date.now() - spotCache.at < 5 * 60 * 1000;
+    if (cached) {
+      spotUsd = spotCache.prices;
+    } else {
+      try {
+        const res = await fetch(
+          `https://api.1inch.com/price/v1.1/8453/${spotAddrs.join(",")}?currency=USD`,
+          { headers: { Authorization: `Bearer ${apiKey}` } },
+        );
+        if (res.ok) {
+          const json = (await res.json()) as Record<string, unknown>;
+          for (const a of spotAddrs) {
+            const v = json[a] ?? json[a.toLowerCase()] ?? null;
+            spotUsd.set(a, v !== null && Number(v) > 0 ? Number(v) : null);
+          }
+          spotCache = { addrs: spotAddrs, prices: spotUsd, at: Date.now() };
+        }
+      } catch {}
+    }
+  }
   const items: Array<{
     strategyHash?: string;
     strategy?: string;
@@ -177,7 +219,11 @@ export async function GET(req: Request) {
         if (rets?.[2]?.success && rets?.[3]?.success) {
           const alA = decodeFunctionResult({ abi: ALLOWANCE_ABI, functionName: "allowance", data: rets[2].returnData }) as unknown as bigint;
           const alB = decodeFunctionResult({ abi: ALLOWANCE_ABI, functionName: "allowance", data: rets[3].returnData }) as unknown as bigint;
-          allowanceOk = alA > 0n && alB > 0n;
+          // Allowance is only required on funded sides: demanding approval
+          // for a token the position holds zero of mislabels single-sided
+          // positions as thin-allowance.
+          allowanceOk =
+            (balA <= 0n || alA > 0n) && (balB <= 0n || alB > 0n);
         }
       }
     } catch {
@@ -229,7 +275,7 @@ export async function GET(req: Request) {
     }
 
     const perf = (p.performance ?? null) as {
-      volume?: { last24h?: { usd?: number }; last7d?: { usd?: number } };
+      volume?: { last24h?: { usd?: number }; last7d?: { usd?: number }; total?: { usd?: number } };
       fees?: { last24h?: { apy?: number; usd?: number | null }; last7d?: { apy?: number; usd?: number | null }; total?: { apy?: number; usd?: number | null } };
     } | null;
     const v24 = numOrNull(perf?.volume?.last24h?.usd);
@@ -238,15 +284,35 @@ export async function GET(req: Request) {
       numOrNull(perf?.fees?.last24h?.apy) ??
       numOrNull(perf?.fees?.last7d?.apy) ??
       numOrNull(perf?.fees?.total?.apy);
+    // Age prefers live openedAt (unix seconds); DB createdAt is the fallback.
+    const openedAtSec = typeof p.openedAt === "number" ? p.openedAt : null;
+    const ageHours =
+      openedAtSec !== null
+        ? (Date.now() / 1000 - openedAtSec) / 3600
+        : ageHoursSince((row as { createdAt?: string | Date } | undefined)?.createdAt);
+    const sideRaws = toks.map((t) => ({ initialRaw: rawOf(t.initialBalance), currentRaw: rawOf(t.currentBalance) }));
+    const untouched =
+      sideRaws.length > 0 &&
+      sideRaws.every((t) => {
+        if (t.initialRaw === undefined || t.currentRaw === undefined) return false;
+        try {
+          return BigInt(t.initialRaw) === BigInt(t.currentRaw);
+        } catch {
+          return false;
+        }
+      });
     let verdict = decideVerdict({
       balA,
       balB,
-      sideDepleted: isSideDepleted(
-        toks.map((t) => ({ initialRaw: rawOf(t.initialBalance), currentRaw: rawOf(t.currentBalance) })),
-      ),
+      sideDepleted: isSideDepleted(sideRaws),
       quoteOk,
       allowanceOk,
       infraDegraded: balA < 0n || balB < 0n,
+      untouched,
+      lifetimeVolumeUsd: numOrNull(perf?.volume?.total?.usd),
+      lifetimeFeesUsd: numOrNull(perf?.fees?.total?.usd),
+      ageHours,
+      graceHours: thresholds.trashGraceHours,
     });
     // Price truth overrides quote probes: a band fully off-spot earns nothing
     // even when one fill direction still quotes.
@@ -262,14 +328,10 @@ export async function GET(req: Request) {
       priceMin: (row as { priceMin?: string | null } | undefined)?.priceMin,
       priceMax: (row as { priceMax?: string | null } | undefined)?.priceMax,
       tokens: toks,
+      usdA: spotUsd.get(tA) ?? null,
+      usdB: spotUsd.get(tB) ?? null,
     });
     if (priceOor === true) verdict = "oor-suspect";
-    // Age prefers live openedAt (unix seconds); DB createdAt is the fallback.
-    const openedAtSec = typeof p.openedAt === "number" ? p.openedAt : null;
-    const ageHours =
-      openedAtSec !== null
-        ? (Date.now() / 1000 - openedAtSec) / 3600
-        : ageHoursSince((row as { createdAt?: string | Date } | undefined)?.createdAt);
     const tokUsd = (t: { currentBalance?: { usd?: number | null } | string }): number | null => {
       const b = t.currentBalance;
       const u = typeof b === "object" && b !== null ? b.usd : null;
@@ -301,8 +363,8 @@ export async function GET(req: Request) {
       trash,
       trashReason,
       gainUsd,
-      gasUsd: 0.08,
-      minBps: 20000,
+      gasUsd: thresholds.gainGasUsd,
+      minBps: thresholds.gainMinBps,
       aiEnforced: false,
     });
     const symOf = (t: { symbol?: string; meta?: { symbol?: string }; address?: string }): string =>
