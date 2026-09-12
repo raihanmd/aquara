@@ -8,6 +8,7 @@ WORKDIR /app
 
 COPY package.json bun.lock ./
 COPY web/package.json ./web/package.json
+COPY web/tsconfig.json ./web/tsconfig.json
 COPY rotator/package.json ./rotator/package.json
 COPY taker-bot/package.json ./taker-bot/package.json
 RUN bun install --frozen-lockfile
