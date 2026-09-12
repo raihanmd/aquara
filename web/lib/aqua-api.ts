@@ -183,6 +183,28 @@ export async function fetchTopPositions(
   return p;
 }
 
+/** Normalized pair key: sorted addresses, fee ignored (same pair, any fee tier). */
+function topPairKey(p: TopPosition): string {
+  const addrs = [p.tokens[0]?.address ?? "", p.tokens[1]?.address ?? ""]
+    .map((a) => String(a).toLowerCase())
+    .sort();
+  return `${addrs[0]}|${addrs[1]}|${p.chainId}`;
+}
+
+/** Earning power: position size x APY. Zero when either is missing. */
+function topEarnPower(p: TopPosition): number {
+  const size = (p.tokens ?? []).reduce((n, t) => {
+    const u = (t as { currentBalance?: { usd?: number | null } })?.currentBalance?.usd;
+    return n + (typeof u === "number" && Number.isFinite(u) ? u : 0);
+  }, 0);
+  const apy =
+    p.performance?.fees?.last24h?.apy ??
+    p.performance?.fees?.last7d?.apy ??
+    p.performance?.fees?.last30d?.apy ??
+    0;
+  return size * (typeof apy === "number" && Number.isFinite(apy) && apy > 0 ? apy : 0);
+}
+
 async function fetchTopPositionsInner(
   chainIds: number[],
   limit: number,
@@ -313,16 +335,16 @@ async function fetchTopPositionsInner(
           if (out.length >= limit) break;
         } catch {}
       }
-      const seenLb = new Set<string>();
-      const distinctOut = out.filter((p) => {
-        const t0 = p.tokens[0]?.symbol ?? p.tokens[0]?.address ?? "";
-        const t1 = p.tokens[1]?.symbol ?? p.tokens[1]?.address ?? "";
-        const fee = (p.classification as any)?.feePercent ?? "";
-        const key = `${t0}-${t1}-${fee}-${p.chainId}`;
-        if (seenLb.has(key)) return false;
-        seenLb.add(key);
-        return true;
-      });
+      // Distinct by normalized pair (sorted addresses - token order varies per
+      // maker). Same pair from several makers keeps ONE: the best earning
+      // power (size x APY), so dust-APY rows and dead-whale rows both lose.
+      const bestByPair = new Map<string, TopPosition>();
+      for (const p of out) {
+        const k = topPairKey(p);
+        const cur = bestByPair.get(k);
+        if (!cur || topEarnPower(p) > topEarnPower(cur)) bestByPair.set(k, p);
+      }
+      const distinctOut = [...bestByPair.values()];
       distinctOut.sort((a, b) => {
         if (sortBy === "apy") {
           const av = a.performance?.fees?.last24h?.apy ?? a.performance?.fees?.last7d?.apy ?? a.performance?.fees?.last30d?.apy ?? -1;
@@ -437,16 +459,13 @@ async function fetchTopPositionsInner(
     enriched.push(...results);
   }
 
-  const seenPairs = new Set<string>();
-  const distinct = enriched.filter((p) => {
-    const t0 = p.tokens[0]?.symbol ?? p.tokens[0]?.address ?? "";
-    const t1 = p.tokens[1]?.symbol ?? p.tokens[1]?.address ?? "";
-    const fee = (p.classification as any)?.feePercent ?? (p.classification as any)?.fee ?? "";
-    const key = `${t0}-${t1}-${fee}-${p.chainId}`;
-    if (seenPairs.has(key)) return false;
-    seenPairs.add(key);
-    return true;
-  });
+  const bestByPair = new Map<string, TopPosition>();
+  for (const p of enriched) {
+    const k = topPairKey(p);
+    const cur = bestByPair.get(k);
+    if (!cur || topEarnPower(p) > topEarnPower(cur)) bestByPair.set(k, p);
+  }
+  const distinct = [...bestByPair.values()];
 
   distinct.sort((a, b) => {
     if (sortBy === "apy") {

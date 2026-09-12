@@ -4,6 +4,7 @@ import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useDelegation } from "@/hooks/use-delegation";
 import { useMyAquaPositions } from "@/hooks/use-my-aqua-positions";
+import { useTopPositions } from "@/hooks/use-top-positions";
 import { QUIRKY_MESSAGES } from "@/lib/config";
 import { TopPositions } from "@/components/aqua/top-positions";
 import { SharedCapital } from "@/components/aqua/shared-capital";
@@ -44,6 +45,17 @@ function netSizeUsd(
 export function PositionsGrid() {
   const { positions, isLoading, error, effectiveMaker, refresh } =
     useMyAquaPositions();
+  // Same tops the TopPositions panel shows: a position already sitting in a
+  // top pair must never wear "Rotate recommended".
+  const { data: topRows } = useTopPositions({ chainIds: [8453], limit: 6, sortBy: "apy" });
+  const topPairKeys = new Set(
+    (topRows ?? []).map((t) =>
+      [(t.tokens[0]?.address ?? ""), (t.tokens[1]?.address ?? "")]
+        .map((a) => String(a).toLowerCase())
+        .sort()
+        .join("|"),
+    ),
+  );
   const {
     status: delegationStatus,
     revoke,
@@ -379,12 +391,19 @@ export function PositionsGrid() {
                       : `${toDisp(rg.max)}–${toDisp(rg.min)}${symQ ? ` ${symQ}` : ""}`;
                   }
                 }
+                const ptoks = ((slot.position as any)?.tokens ?? []).map((t: any) =>
+                  String(t?.address ?? "").toLowerCase(),
+                );
+                const isTopPair =
+                  ptoks.length >= 2 &&
+                  topPairKeys.has([...ptoks.slice(0, 2)].sort().join("|"));
                 return (
                   <AquaPositionCard
                     key={slot.position.strategyHash + idx}
                     position={slot.position}
                     rangeLabel={rangeLabel}
                     signal={signalMap[hashKey] ?? null}
+                    isTopPair={isTopPair}
                     deployedAt={ageMap[hashKey] ?? null}
                     onClosed={() => {
                       refresh();

@@ -126,6 +126,18 @@ async function rotateOnce(maker: string): Promise<void> {
   const symOf = (a: string) => symByAddr.get(a.toLowerCase()) ?? a.slice(0, 6);
   const deployLabel = deployPairs.map((p) => `${symOf(p.tokenA)}/${symOf(p.tokenB)}`).join(" + ");
   const srcLabel = [...new Set(group.map((c) => (c.symbols ? `${c.symbols[0]}/${c.symbols[1]}` : `${c.tokenA.slice(0, 6)}/${c.tokenB.slice(0, 6)}`)))].join(" + ");
+  // Already a top pair: rotating it would churn gas into the same
+  // destination. Skip before anything is spent (dashboard hides the badge
+  // for the same reason).
+  const pairKeyOf = (a: string, b: string) =>
+    [a.toLowerCase(), b.toLowerCase()].sort().join("|");
+  const groupTop = group.filter((c) =>
+    deployPairs.some((p) => pairKeyOf(p.tokenA, p.tokenB) === pairKeyOf(c.tokenA, c.tokenB)),
+  );
+  if (groupTop.length === group.length) {
+    logRotate({ at, maker, strategyHash: groupTag, pair: srcLabel, decision: "skip", reason: `already a top pair (${deployLabel}) - nothing to gain`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
+    return true;
+  }
   if (dryRun) {
     logRotate({ at, maker, strategyHash: group.map((c) => c.strategyHash.slice(0, 10)).join("+"), pair: `${srcLabel} -> ${deployLabel}`, decision: "dry-run", reason: `group of ${group.length} (${srcLabel}) -> ${topNote} (${deployLabel}): ${reason}`, verdict: candidate.verdict, aiLevel: candidate.aiLevel ?? undefined, dryRun });
     return true;

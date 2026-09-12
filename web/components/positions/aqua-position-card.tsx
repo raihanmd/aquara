@@ -95,15 +95,20 @@ export function AquaPositionCard({
   position,
   rangeLabel,
   signal,
+  isTopPair = false,
   deployedAt,
   onClosed,
 }: {
   position: EnrichedAquaPosition;
   rangeLabel?: string | null;
   signal?: { eligible: boolean; headline: string; reasons: string[]; verdict: string } | null;
+  isTopPair?: boolean;
   deployedAt?: string | null;
   onClosed?: () => void;
 }) {
+  // Already sitting in a top pair: rotating it would just churn gas for the
+  // same destination, so the recommend badge and highlight stay off.
+  const showRecommend = signal?.eligible === true && !isTopPair;
   // Balance-based isOutOfRange misses price OOR (both sides funded but
   // outside the band). The signal verdict probes quotes onchain instead.
   const signalOor =
@@ -162,7 +167,7 @@ export function AquaPositionCard({
 
   return (
     <StrategyCard
-      highlight={signal?.eligible === true}
+      highlight={showRecommend}
       pair={getPairLabel(position)}
       tokens={[
         {
@@ -222,7 +227,7 @@ export function AquaPositionCard({
       extra={
         <div className="space-y-1.5">
           <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
-            {signal?.eligible === true ? (
+            {showRecommend ? (
               <Badge
                 variant="destructive"
                 className="rounded-md px-2 py-0.5 text-[10px] font-semibold"
