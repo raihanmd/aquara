@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+dist
+*.log
+.DS_Store
