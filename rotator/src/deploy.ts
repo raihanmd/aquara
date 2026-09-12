@@ -81,7 +81,31 @@ export async function pickPricedCapital(
   return null;
 }
 
-import { quoteSwapExact, quoteOnly, lastQuoteDiag } from "../../web/lib/oneinch-quote.ts";
+import { quoteSwapExact, quoteOnly, lastQuoteDiag, type QuoteSanity } from "../../web/lib/oneinch-quote.ts";
+
+/** Price-implied sanity for one swap leg. Undefined when unpriceable (gate opens, quote still needs a route). */
+async function legSanity(
+  cfg: RotatorConfig,
+  client: ReturnType<typeof clientFor>,
+  src: string,
+  dst: string,
+): Promise<QuoteSanity | undefined> {
+  try {
+    const [[sDec, sUsd], [dDec, dUsd]] = await Promise.all(
+      [src, dst].map(async (t) => {
+        const [dec, px] = await Promise.all([
+          client.readContract({ address: t as Address, abi: ERC20_MIN, functionName: "decimals" }).catch(() => null) as Promise<number | null>,
+          tokenPriceUsd(cfg.oneinchKey, t),
+        ]);
+        return [dec, px] as [number | null, number | null];
+      }),
+    );
+    if (sDec === null || dDec === null || sUsd === null || dUsd === null) return undefined;
+    return { srcUsd: sUsd, dstUsd: dUsd, srcDec: sDec, dstDec: dDec };
+  } catch {
+    return undefined;
+  }
+}
 
 export function clientFor(rpcUrl: string) {
   return createPublicClient({ chain: base, transport: http(rpcUrl) });
@@ -116,9 +140,11 @@ export async function preflightSwaps(
   from: string,
 ): Promise<{ ok: true; legs: Array<{ token: string; amount: bigint; out: bigint }> } | { ok: false; reason: string }> {
   const legs: Array<{ token: string; amount: bigint; out: bigint }> = [];
+  const client = clientFor(cfg.rpcUrl);
   for (const f of funds) {
     if (f.token.toLowerCase() === capital.toLowerCase() || f.amount === 0n) continue;
-    const q = await quoteOnly({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: f.amount });
+    const sanity = await legSanity(cfg, client, f.token, capital);
+    const q = await quoteOnly({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: f.amount, sanity });
     if (!q || q.dstAmount === 0n)
       return { ok: false, reason: `no swap route ${f.token.slice(0, 6)}->${capital.slice(0, 6)} (${f.amount} raw) [${lastQuoteDiag()}] - skipping before dock, no gas spent` };
     legs.push({ token: f.token, amount: f.amount, out: q.dstAmount });
@@ -193,8 +219,16 @@ export async function mergeFundsToCapital(
     const wallet = await tokenBalance(client, f.token, maker).catch(() => 0n);
     const spend = f.amount < wallet ? f.amount : wallet;
     if (spend === 0n) continue;
-    // Same shared quoter as /deploy: identical pacing, retries, slippage.
-    const q = await quoteSwapExact({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: spend, from: maker, slippage });
+    // Re-quote up to 3x: volatile routes go stale between quote and sim
+    // (observed live on cbETH). Each retry fetches a fresh quote.
+    let q: Awaited<ReturnType<typeof quoteSwapExact>> = null;
+    let qTries = 0;
+    for (; qTries < 3; qTries++) {
+      if (qTries > 0) await new Promise((r) => setTimeout(r, 4000 * qTries));
+      const sanity = await legSanity(cfg, client, f.token, capital);
+      q = await quoteSwapExact({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: spend, from: maker, slippage, sanity });
+      if (q && q.dstAmount > 0n) break;
+    }
     if (!q || q.dstAmount === 0n)
       return { ok: false, reason: `no swap route ${f.token.slice(0, 6)}->${capital.slice(0, 6)} (${spend} raw) [${lastQuoteDiag()}] - merged so far stays in wallet` };
     const alw = (await client.readContract({
@@ -208,16 +242,26 @@ export async function mergeFundsToCapital(
             data: encodeFunctionData({ abi: ERC20_MIN, functionName: "approve", args: [V6_ROUTER, MAX_UINT] }),
           }
         : null;
-    const swapCall = { to: q.to, value: q.value, data: q.data };
+    let swapCall = { to: q.to, value: q.value, data: q.data };
     // Per-leg sims name the failing call before any gas is spent (deploy
-    // parity: deploy sims each leg solo for the same reason).
+    // parity: deploy sims each leg solo for the same reason). One retry with
+    // a fresh quote: sims fail on stale volatile routes, not just bad ones.
     const { simulateBatch } = await import("../../web/lib/calibur-agent.ts");
     if (approveCall) {
       const ae = await simulateBatch(maker as Address, [approveCall]);
       if (ae)
         return { ok: false, reason: `merge approve would revert ${f.token.slice(0, 6)} (${ae.slice(0, 100)}) - nothing sent, funds stay put` };
     }
-    const se = await simulateBatch(maker as Address, [swapCall]);
+    let se = await simulateBatch(maker as Address, [swapCall]);
+    if (se) {
+      await new Promise((r) => setTimeout(r, 4000));
+      const sanity2 = await legSanity(cfg, client, f.token, capital);
+      const q2 = await quoteSwapExact({ apiKey: cfg.oneinchKey, src: f.token, dst: capital, amount: spend, from: maker, slippage, sanity: sanity2 });
+      if (q2 && q2.dstAmount > 0n) {
+        swapCall = { to: q2.to, value: q2.value, data: q2.data };
+        se = await simulateBatch(maker as Address, [swapCall]);
+      }
+    }
     if (se)
       return { ok: false, reason: `merge swap would revert ${f.token.slice(0, 6)}->${capital.slice(0, 6)} (${se.slice(0, 100)}) - nothing sent, funds stay put` };
     const calls: Array<{ to: Address; value: bigint; data: Hex }> = [...(approveCall ? [approveCall] : []), swapCall];
@@ -226,7 +270,15 @@ export async function mergeFundsToCapital(
     } catch (e: unknown) {
       return { ok: false, reason: `merge swap failed ${f.token.slice(0, 6)}->${capital.slice(0, 6)}: ${String((e as Error)?.message ?? e).slice(0, 120)} - merged so far stays in wallet` };
     }
-    const capNow = await tokenBalance(client, capital, maker).catch(() => capBase + swappedIn);
+    // Settle-poll the receipt: LB nodes serve pre-swap state for seconds,
+    // and a stale zero here silently shrinks the deploy budget.
+    let capNow = await tokenBalance(client, capital, maker).catch(() => capBase + swappedIn);
+    for (let fr = 0; fr < 4; fr++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const n = await tokenBalance(client, capital, maker).catch(() => capNow);
+      if (n === capNow) break;
+      capNow = n;
+    }
     const got = capNow > capBase + swappedIn ? capNow - (capBase + swappedIn) : 0n;
     swappedIn += got;
     // Per-leg receive check vs quote: flags short fills loudly. No abort

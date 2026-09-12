@@ -13,7 +13,7 @@ import { base } from "viem/chains";
 import { prisma } from "@/lib/prisma";
 import { AQUA, AQUA_ROUTER } from "@/lib/config";
 import { AQUA_BASE, aquaHeaders, pace } from "@/lib/aqua-api";
-import { quoteSwapExact, lastQuoteDiag } from "@/lib/oneinch-quote";
+import { quoteSwapExact, lastQuoteDiag, type QuoteSanity } from "@/lib/oneinch-quote";
 import { verifyDeployIntent } from "@/lib/deploy-auth";
 import { agentSignAndSubmit, simulateBatch, type CaliburCall } from "@/lib/calibur-agent";
 
@@ -191,12 +191,30 @@ async function quoteSwap(
   from: string,
   slippage: number,
   apiKey: string,
+  sanity?: QuoteSanity,
 ): Promise<{ to: Address; data: Hex; value: bigint; out: bigint | null }> {
   // Single shared quoter (web/lib/oneinch-quote.ts): deploy and rotator
   // merge quote identically by construction - pacing, retries, slippage.
-  const q = await quoteSwapExact({ apiKey, src, dst, amount, from, slippage });
+  const q = await quoteSwapExact({ apiKey, src, dst, amount, from, slippage, sanity });
   if (!q) throw new Error(lastQuoteDiag() || "Swap quote failed");
   return { to: q.to, data: q.data, value: q.value, out: q.dstAmount };
+}
+
+function priceSanity(
+  prices: Map<string, number | null>,
+  decMap: Map<string, number>,
+  src: string,
+  dst: string,
+): QuoteSanity | undefined {
+  // Map keys mix cases across sources - try exact then lowercase.
+  const get2 = (m: Map<string, any>, k: string) =>
+    m.get(k) ?? m.get(k.toLowerCase()) ?? null;
+  const su = get2(prices, src);
+  const du = get2(prices, dst);
+  const sd = get2(decMap, src);
+  const dd = get2(decMap, dst);
+  if (su === null || du === null || sd === null || dd === null) return undefined;
+  return { srcUsd: su, dstUsd: du, srcDec: sd, dstDec: dd };
 }
 
 async function runDeployPipeline(
@@ -604,6 +622,7 @@ async function runDeployPipeline(
               maker,
               slippage,
               apiKey,
+              priceSanity(prices, decMap, capital, side),
             );
             if (q.out === null || q.out === 0n)
               throw new Error(
@@ -881,11 +900,25 @@ async function runDeployPipeline(
           // Measure, then batch 2: every ship in ONE execute. Clamp needs to
           // measured post-swap balances: quotes drift above reality and a
           // ship pulling even dust more than present reverts the batch.
+          // Freshness first: LB nodes serve pre-swap state for seconds after
+          // the receipt. Poll until at least one side moves, else the clamp
+          // zeroes a side that is actually funded (observed live: 0.94 AERO
+          // read as 0 right after delivery).
           const shipPlans: typeof plans = [];
           for (const plan of plans) {
             const i = plan.idx;
-            const postA = await balOfExec(plan.tokenA);
-            const postB = await balOfExec(plan.tokenB);
+            let postA = await balOfExec(plan.tokenA);
+            let postB = await balOfExec(plan.tokenB);
+            // Settle-poll: two identical consecutive reads means the node
+            // caught up with the swap receipt. Skipped when no swaps ran.
+            for (let fr = 0; fr < 6 && allLegs.length > 0; fr++) {
+              await sleep(3000);
+              const nA = await balOfExec(plan.tokenA);
+              const nB = await balOfExec(plan.tokenB);
+              if (nA === postA && nB === postB) break;
+              postA = nA;
+              postB = nB;
+            }
             if (postA === 0n && postB === 0n) {
               await pushStep({
                 pair: i,
@@ -1059,6 +1092,7 @@ async function runDeployPipeline(
                       maker,
                       slippage,
                       apiKey,
+                      priceSanity(prices, decMap, capital, leg.token),
                     );
                     swapHash = await submitOne(fresh.data);
                   } catch (e2: unknown) {

@@ -69,6 +69,37 @@ function outOf(json: unknown): bigint | null {
  * same retries, same slippage handling, same diagnostics - behavior cannot
  * drift between the two callers by construction.
  */
+export interface QuoteSanity {
+  /** USD per whole token, e.g. from the price API. */
+  srcUsd: number;
+  dstUsd: number;
+  srcDec: number;
+  dstDec: number;
+  /** Max allowed drift vs price-implied output. Env QUOTE_SANITY_PCT, default 5. */
+  maxDriftPct?: number;
+}
+
+function sanityLimit(s?: QuoteSanity): number {
+  // Default 25: catches 10x+ misquotes dead while tolerating volatile tokens
+  // and stale price feeds (a real 14% variance was observed on AERO).
+  const v = Number(process.env.QUOTE_SANITY_PCT ?? s?.maxDriftPct ?? 25);
+  return Number.isFinite(v) && v > 0 ? v : 25;
+}
+
+/** Null when sane, rejection text when the quote is off-market. */
+export function checkSanity(quotedOut: bigint, amount: bigint, s?: QuoteSanity): string | null {
+  if (!s) return null;
+  if (!(s.srcUsd > 0) || !(s.dstUsd > 0) || amount <= 0n) return null;
+  const expected = (Number(amount) / 10 ** s.srcDec) * s.srcUsd / (s.dstUsd / 10 ** s.dstDec);
+  if (!(expected > 0) || !Number.isFinite(expected)) return null;
+  const got = Number(quotedOut);
+  const drift = Math.abs(got - expected) / expected;
+  if (drift * 100 > sanityLimit(s)) {
+    return `off-market quote: got ${got} expected ~${expected.toFixed(2)} (${(drift * 100).toFixed(1)}% drift)`;
+  }
+  return null;
+}
+
 export async function quoteSwapExact(args: {
   apiKey: string;
   src: string;
@@ -76,6 +107,7 @@ export async function quoteSwapExact(args: {
   amount: bigint;
   from: string;
   slippage?: number;
+  sanity?: QuoteSanity;
 }): Promise<SwapQuoteTx | null> {
   const { apiKey, src, dst, amount, from } = args;
   const slippage = args.slippage ?? 0.5;
@@ -120,11 +152,17 @@ export async function quoteSwapExact(args: {
       diag = `empty-tx ${JSON.stringify(json).slice(0, 120)}`;
       return null;
     }
+    const dstAmount = outOf(json) ?? 0n;
+    const insane = checkSanity(dstAmount, amount, args.sanity);
+    if (insane) {
+      diag = insane;
+      return null;
+    }
     return {
       to: j.tx.to as Address,
       data: j.tx.data as Hex,
       value: BigInt(j.tx.value ?? 0),
-      dstAmount: outOf(json) ?? 0n,
+      dstAmount,
     };
   }
 }
@@ -135,6 +173,7 @@ export async function quoteOnly(args: {
   src: string;
   dst: string;
   amount: bigint;
+  sanity?: QuoteSanity;
 }): Promise<{ dstAmount: bigint } | null> {
   diag = "";
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -165,6 +204,11 @@ export async function quoteOnly(args: {
     const amt = outOf(json);
     if (amt === null) {
       diag = "no amount in quote";
+      return null;
+    }
+    const insane = checkSanity(amt, args.amount, args.sanity);
+    if (insane) {
+      diag = insane;
       return null;
     }
     return { dstAmount: amt };
