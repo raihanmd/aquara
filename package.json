@@ -11,6 +11,7 @@
   "scripts": {
     "dev:web": "bun --cwd web dev",
     "build:web": "bun --cwd web build",
+    "dev:bot": "bun --cwd taker-bot dev",
     "start:bot": "bun --cwd taker-bot start",
     "dev:rotator": "bun --cwd rotator dev",
     "start:rotator": "bun --cwd rotator start",

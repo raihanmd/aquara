@@ -2,7 +2,7 @@
 # - secrets.NEXT_PUBLIC_RPC_URL (required)  -> build-arg NEXT_PUBLIC_RPC_URL, e.g. https://lb.drpc.live/base/<key>
 # - vars or build-args (defaults in workflow):
 #     NEXT_PUBLIC_CHAIN_ID=8453
-#     NEXT_PUBLIC_AGENT_ADDRESS=0x5235401AbA9b0f597A19B48497bf174a4dA8A090
+#     NEXT_PUBLIC_AGENT_ADDRESS=0xA0A2a81f3295566c5FA56784629cF2bd5F90C5a4
 #
 # Server-only runtime envs (NOT baked into image, set on VPS via --env-file .env):
 #   DATABASE_URL, ONEINCH_API_KEY, RELAYER_PRIVATE_KEY
@@ -68,7 +68,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             NEXT_PUBLIC_CHAIN_ID=8453
-            NEXT_PUBLIC_AGENT_ADDRESS=0x5235401AbA9b0f597A19B48497bf174a4dA8A090
+            NEXT_PUBLIC_AGENT_ADDRESS=0xA0A2a81f3295566c5FA56784629cF2bd5F90C5a4
             NEXT_PUBLIC_RPC_URL=${{ secrets.NEXT_PUBLIC_RPC_URL }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
