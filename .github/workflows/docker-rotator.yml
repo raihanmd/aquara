@@ -1,0 +1,71 @@
+# Required GitHub Secrets / Vars: none (all config is runtime env, see below).
+#
+# Server-only runtime envs (NOT baked into image, set on VPS via --env-file):
+#   ROT_WEB_BASE, ROT_RPC_URL, ROT_RELAYER_KEY, ROT_CRON_KEY, ROT_ONEINCH_KEY,
+#   ROT_LIVE, ROT_INTERVAL_MS, ROT_MAX_PER_DAY, ROT_GROUP_MAX_SIZE,
+#   ROT_TOP_MAX_PAIRS, ROT_TOP_MIN_RATIO, ROT_MIN_GAIN_BPS, ROT_GAS_USD,
+#   ROT_MIN_CAPITAL_USD, ROT_DAILY_GAS_CAP_USD, ROT_TOP_MODE, ROT_AI_* ...
+#   (full list with comments in rotator/.env.example)
+# VPS run example:
+#   docker run -p 3102:3102 --env-file rotator/.env ghcr.io/<owner>/aquara-rotator:latest
+# Tag release: `git tag v1.2.3 && git push origin v1.2.3` produces `ghcr.io/<owner>/aquara-rotator:1.2.3`.
+
+name: docker-rotator
+
+on:
+  push:
+    tags: ["v*.*.*"]
+    paths:
+      - "rotator/**"
+      - "web/lib/**"
+  workflow_dispatch:
+
+concurrency:
+  group: docker-rotator-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/aquara-rotator
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./rotator/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

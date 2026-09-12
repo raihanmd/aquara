@@ -1,0 +1,55 @@
+# Aquara full stack (Compose v2, profiles).
+#
+# Dev infra only (postgres, existing behavior):
+#   docker compose --profile dev up -d
+#
+# Full GHCR stack (web + rotator + taker-bot images):
+#   TAG=v1.2.3 docker compose --profile ghcr up -d
+# App reachable at http://localhost:3677, rotator :3102, taker-bot :3101.
+# Images are built by .github/workflows/docker-{web,rotator,taker-bot}.yml
+# on every v*.*.* tag (see each workflow for path filters).
+
+services:
+  postgres:
+    profiles: ["dev"]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aqua
+      POSTGRES_PASSWORD: aqua
+      POSTGRES_DB: aqua
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aqua -d aqua"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    profiles: ["web"]
+    image: ${WEB_IMAGE:-ghcr.io/raihanmd/aquara-web}:${TAG:-latest}
+    ports: ["3677:3000"]
+    env_file: [web/.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://aqua:aqua@postgres:5432/aqua?schema=public}
+    restart: unless-stopped
+
+  rotator:
+    profiles: ["rotator"]
+    image: ${ROT_IMAGE:-ghcr.io/raihanmd/aquara-rotator}:${TAG:-latest}
+    ports: ["3102:3102"]
+    env_file: [rotator/.env]
+    restart: unless-stopped
+
+  taker-bot:
+    profiles: ["taker"]
+    image: ${BOT_IMAGE:-ghcr.io/raihanmd/aquara-taker-bot}:${TAG:-latest}
+    ports: ["3101:3101"]
+    env_file: [taker-bot/.env]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
